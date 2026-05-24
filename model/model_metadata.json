@@ -1,0 +1,30 @@
+{
+    "model_name": "U-Net V3",
+    "version": "3.0",
+    "architecture": "U-Net with BatchNorm and ReLU",
+    "input_shape": [
+        14,
+        128,
+        128
+    ],
+    "output_shape": [
+        1,
+        128,
+        128
+    ],
+    "total_parameters": 7709313,
+    "loss_function": "Focal Loss (alpha=0.75, gamma=2.0)",
+    "optimizer": "Adam (lr=0.001)",
+    "training_samples": 3039,
+    "validation_samples": 760,
+    "epochs": 3,
+    "performance": {
+        "precision": 0.6219,
+        "recall": 0.7074,
+        "specificity": 0.9895,
+        "accuracy": 0.9827,
+        "f1_score": 0.6619
+    },
+    "training_date": "2026-05-10 07:37:18",
+    "device": "GPU (CUDA)"
+}

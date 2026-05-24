@@ -1,0 +1,17 @@
+.env
+.env.*
+
+venv/
+.venv/
+env/
+.env/
+
+__pycache__/
+*.py[cod]
+
+training_docs/
+data/
+backend/.venv/
+backend/.venv-*/
+uvicorn.err.log
+uvicorn.out.log
