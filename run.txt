@@ -1,0 +1,4 @@
+run backend:
+    source backend/.venv-py310/Scripts/activate
+    ./backend/.venv-py310/Scripts/python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+

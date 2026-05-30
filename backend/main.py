@@ -2,6 +2,7 @@ import os
 import json
 import sys
 from pathlib import Path
+from functools import lru_cache
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -9,9 +10,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 
+try:
+    import shapefile
+except ImportError:  # pragma: no cover - depends on runtime environment
+    shapefile = None
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+
+MUNICIPALITY_BOUNDARY_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "southern_leyte"
+    / "boundary"
+    / "gadm41_PHL_2.shp"
+)
+BARANGAY_BOUNDARY_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "southern_leyte"
+    / "boundary"
+    / "gadm41_PHL_3.shp"
+)
 
 from model.inference import (
     run_landslide_predictions,
@@ -34,6 +57,13 @@ app.add_middleware(
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
+
+
+LOSS_ASSUMPTIONS = {
+    "population_per_sq_km": 330,
+    "asset_value_php_per_sq_km": 18_000_000,
+    "casualty_rate": 0.015,
+}
 
 
 class RainfallSimulationRequest(BaseModel):
@@ -64,12 +94,154 @@ def db_health():
     }
 
 
+@lru_cache(maxsize=1)
+def load_southern_leyte_municipality_boundaries():
+    if shapefile is None or not MUNICIPALITY_BOUNDARY_PATH.exists():
+        return {}
+
+    reader = shapefile.Reader(str(MUNICIPALITY_BOUNDARY_PATH))
+    fields = [field[0] for field in reader.fields[1:]]
+    boundaries = {}
+
+    for shape_record in reader.iterShapeRecords():
+        record = dict(zip(fields, shape_record.record))
+
+        if record.get("NAME_1") != "Southern Leyte":
+            continue
+
+        name = record.get("NAME_2")
+        min_lon, min_lat, max_lon, max_lat = shape_record.shape.bbox
+        boundaries[name.lower()] = {
+            "type": "Feature",
+            "properties": {
+                "name": name,
+                "province": record.get("NAME_1"),
+                "bounds": [[min_lat, min_lon], [max_lat, max_lon]],
+            },
+            "geometry": shape_record.shape.__geo_interface__,
+        }
+
+    return boundaries
+
+
+@app.get("/municipality-boundary/{municipality_name}")
+def municipality_boundary(municipality_name: str):
+    boundaries = load_southern_leyte_municipality_boundaries()
+    boundary = boundaries.get(municipality_name.lower())
+
+    if boundary is None:
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+
+    return boundary
+
+
+@app.get("/municipality-boundaries")
+def municipality_boundaries():
+    boundaries = load_southern_leyte_municipality_boundaries()
+
+    return {
+        "type": "FeatureCollection",
+        "features": list(boundaries.values()),
+    }
+
+
+@lru_cache(maxsize=1)
+def load_southern_leyte_barangay_boundaries():
+    if shapefile is None or not BARANGAY_BOUNDARY_PATH.exists():
+        return {}
+
+    reader = shapefile.Reader(str(BARANGAY_BOUNDARY_PATH))
+    fields = [field[0] for field in reader.fields[1:]]
+    barangays_by_municipality = {}
+
+    for shape_record in reader.iterShapeRecords():
+        record = dict(zip(fields, shape_record.record))
+
+        if record.get("NAME_1") != "Southern Leyte":
+            continue
+
+        municipality_name = record.get("NAME_2")
+        barangay_name = record.get("NAME_3")
+        min_lon, min_lat, max_lon, max_lat = shape_record.shape.bbox
+        feature = {
+            "type": "Feature",
+            "properties": {
+                "name": barangay_name,
+                "municipality": municipality_name,
+                "bounds": [[min_lat, min_lon], [max_lat, max_lon]],
+            },
+            "geometry": shape_record.shape.__geo_interface__,
+        }
+
+        barangays_by_municipality.setdefault(municipality_name.lower(), []).append(
+            feature
+        )
+
+    return barangays_by_municipality
+
+
+@app.get("/municipality-boundary/{municipality_name}/barangays")
+def municipality_barangays(municipality_name: str):
+    barangays_by_municipality = load_southern_leyte_barangay_boundaries()
+
+    return {
+        "type": "FeatureCollection",
+        "features": barangays_by_municipality.get(municipality_name.lower(), []),
+    }
+
+
 @app.get("/model-health")
 def model_health():
     return {
         "model": "U-Net V3",
         "status": "loaded",
         "inference_check": run_sample_inference(),
+    }
+
+
+def estimate_loss(probability, risk_level, area_sq_km):
+    severity_multiplier = {
+        "15%": 0.15,
+        "30%": 0.30,
+        "50%": 0.50,
+        "75%": 0.75,
+        "100%": 1.00,
+        "Low": 0.25,
+        "Medium": 0.55,
+        "High": 0.85,
+    }.get(risk_level, max(min(float(probability), 1.0), 0.0))
+
+    affected_population = area_sq_km * LOSS_ASSUMPTIONS["population_per_sq_km"]
+    economic_loss = (
+        area_sq_km
+        * LOSS_ASSUMPTIONS["asset_value_php_per_sq_km"]
+        * severity_multiplier
+    )
+    possible_casualties = (
+        affected_population
+        * severity_multiplier
+        * LOSS_ASSUMPTIONS["casualty_rate"]
+    )
+
+    if severity_multiplier >= 0.75:
+        recommendation = "Evacuate exposed households, close unsafe roads, and pre-position rescue and medical teams."
+    elif severity_multiplier >= 0.50:
+        recommendation = "Prepare evacuation centers, inspect slopes and drainage, and issue barangay-level warnings."
+    elif severity_multiplier >= 0.30:
+        recommendation = "Increase monitoring, clear drainage, and advise residents to avoid steep or saturated slopes."
+    else:
+        recommendation = "Maintain routine monitoring and keep residents informed through local advisories."
+
+    return {
+        "estimated_area_sq_km": round(area_sq_km, 3),
+        "estimated_affected_people": round(affected_population),
+        "estimated_economic_loss_php": round(economic_loss),
+        "estimated_possible_casualties": round(possible_casualties, 1),
+        "recommendation": recommendation,
+        "basis": "Planning estimate using mapped area, risk probability, population density, and asset exposure assumptions.",
     }
 
 
@@ -82,6 +254,7 @@ def risk_zones():
             name,
             risk_level,
             probability,
+            ST_Area(geom::geography) / 1000000.0 AS area_sq_km,
             ST_AsGeoJSON(geom)::json AS geometry
         FROM risk_zones
         ORDER BY
@@ -113,6 +286,11 @@ def risk_zones():
                     "name": row["name"],
                     "risk_level": row["risk_level"],
                     "probability": row["probability"],
+                    "loss_estimate": estimate_loss(
+                        row["probability"],
+                        row["risk_level"],
+                        float(row["area_sq_km"] or 0),
+                    ),
                 },
                 "geometry": row["geometry"]
                 if isinstance(row["geometry"], dict)

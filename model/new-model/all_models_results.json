@@ -1,0 +1,33 @@
+{
+  "models": {
+    "resnet": {
+      "best_f1": 0.690020631013362,
+      "completed": true
+    },
+    "attention_unet": {
+      "best_f1": 0.7340964120625139,
+      "completed": true
+    },
+    "student": {
+      "best_f1": 0.7190174961635231,
+      "completed": true
+    },
+    "v2_cnn": {
+      "best_f1": 0.5139,
+      "completed": true
+    },
+    "unet": {
+      "best_f1": 0.42,
+      "completed": true
+    }
+  },
+  "best_f1_scores": {
+    "V2_CNN": 0,
+    "UNet": 0.42,
+    "ResNet": 0.690020631013362,
+    "Attention_UNet": 0,
+    "Student": 0.7190174961635231
+  },
+  "training_completed": "2026-05-27T21:07:30.825873",
+  "figures_folder": "/content/gdrive/MyDrive/Colab Notebooks/models/figures"
+}
