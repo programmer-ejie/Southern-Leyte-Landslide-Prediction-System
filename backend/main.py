@@ -1368,59 +1368,7 @@ def restore_baseline_risk():
 @app.post("/predict")
 def predict():
     prediction_result = run_landslide_predictions()
-
-    query = text(
-        """
-        INSERT INTO risk_zones (name, risk_level, probability, geom)
-        VALUES (
-            :name,
-            :risk_level,
-            :probability,
-            ST_GeomFromText(:wkt, 4326)
-        )
-        ON CONFLICT (name) DO UPDATE SET
-            risk_level = EXCLUDED.risk_level,
-            probability = EXCLUDED.probability,
-            geom = EXCLUDED.geom
-        RETURNING id, name, risk_level, probability;
-        """
-    )
-    cleanup_query = text(
-        """
-        DELETE FROM risk_zones
-        WHERE name LIKE 'Rainfall Simulation % Risk'
-            OR name LIKE 'Live Rainfall Prediction % Risk'
-            OR name IN (
-            'U-Net Sample Prediction',
-            'U-Net High Risk',
-            'U-Net Medium Risk',
-            'U-Net Low Risk',
-            'Local Susceptibility High Risk',
-            'Local Susceptibility Medium Risk',
-            'Local Susceptibility Low Risk',
-            'NOAH Fine-Tuned U-Net High Risk',
-            'NOAH Fine-Tuned U-Net Medium Risk',
-            'NOAH Fine-Tuned U-Net Low Risk',
-            'NOAH Fine-Tuned U-Net 15% Risk',
-            'NOAH Fine-Tuned U-Net 30% Risk',
-            'NOAH Fine-Tuned U-Net 50% Risk',
-            'NOAH Fine-Tuned U-Net 75% Risk',
-            'NOAH Fine-Tuned U-Net 100% Risk',
-            'Attention U-Net 15% Risk',
-            'Attention U-Net 30% Risk',
-            'Attention U-Net 50% Risk',
-            'Attention U-Net 75% Risk',
-            'Attention U-Net 100% Risk'
-        );
-        """
-    )
-
-    with engine.begin() as conn:
-        conn.execute(cleanup_query)
-        rows = [
-            conn.execute(query, prediction).mappings().one()
-            for prediction in prediction_result["predictions"]
-        ]
+    rows = replace_risk_zones(prediction_result["predictions"])
 
     return {
         "message": "Model risk-band predictions saved",
@@ -1434,36 +1382,7 @@ def predict():
 @app.post("/predict-live")
 def predict_live():
     prediction_result = run_live_rainfall_prediction()
-
-    query = text(
-        """
-        INSERT INTO risk_zones (name, risk_level, probability, geom)
-        VALUES (
-            :name,
-            :risk_level,
-            :probability,
-            ST_GeomFromText(:wkt, 4326)
-        )
-        ON CONFLICT (name) DO UPDATE SET
-            risk_level = EXCLUDED.risk_level,
-            probability = EXCLUDED.probability,
-            geom = EXCLUDED.geom
-        RETURNING id, name, risk_level, probability;
-        """
-    )
-    cleanup_query = text(
-        """
-        DELETE FROM risk_zones
-        WHERE name LIKE 'Live Rainfall Prediction % Risk';
-        """
-    )
-
-    with engine.begin() as conn:
-        conn.execute(cleanup_query)
-        rows = [
-            conn.execute(query, prediction).mappings().one()
-            for prediction in prediction_result["predictions"]
-        ]
+    rows = replace_risk_zones(prediction_result["predictions"])
 
     return {
         "message": "Live rainfall prediction saved",
@@ -1482,36 +1401,7 @@ def simulate_rainfall(request: RainfallSimulationRequest):
         duration_hours=request.duration_hours,
         saturation_factor=request.saturation_factor,
     )
-
-    query = text(
-        """
-        INSERT INTO risk_zones (name, risk_level, probability, geom)
-        VALUES (
-            :name,
-            :risk_level,
-            :probability,
-            ST_GeomFromText(:wkt, 4326)
-        )
-        ON CONFLICT (name) DO UPDATE SET
-            risk_level = EXCLUDED.risk_level,
-            probability = EXCLUDED.probability,
-            geom = EXCLUDED.geom
-        RETURNING id, name, risk_level, probability;
-        """
-    )
-    cleanup_query = text(
-        """
-        DELETE FROM risk_zones
-        WHERE name LIKE 'Rainfall Simulation % Risk';
-        """
-    )
-
-    with engine.begin() as conn:
-        conn.execute(cleanup_query)
-        rows = [
-            conn.execute(query, prediction).mappings().one()
-            for prediction in simulation_result["predictions"]
-        ]
+    rows = replace_risk_zones(simulation_result["predictions"])
 
     return {
         "message": "Rainfall simulation saved",

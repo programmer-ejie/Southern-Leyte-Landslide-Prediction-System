@@ -122,6 +122,65 @@ function formatRiskPercent(value) {
   return `${formatNumber(value ?? 0)}%`
 }
 
+function formatRunTimestamp(value) {
+  if (!value) {
+    return 'Current session'
+  }
+
+  return new Date(value).toLocaleString('en-PH')
+}
+
+function getActiveLayerInfo(riskZones, latestRunMetadata) {
+  const firstName = riskZones?.features?.[0]?.properties?.name ?? ''
+
+  if (firstName.startsWith('Baseline Hazard')) {
+    return {
+      label: 'Baseline Hazard',
+      source: 'Curated 5-level Southern Leyte hazard mask',
+      detail: 'Static planning layer restored from local baseline data.',
+      tone: 'baseline',
+    }
+  }
+
+  if (firstName.startsWith('Live Rainfall Prediction')) {
+    const liveWeather = latestRunMetadata?.scenario?.live_weather
+
+    return {
+      label: 'Live Rainfall Prediction',
+      source: `${liveWeather?.source ?? 'Open-Meteo Forecast API'} + baseline hazard + local tensor`,
+      detail: liveWeather?.fetched_at_utc
+        ? `Fetched ${formatRunTimestamp(liveWeather.fetched_at_utc)}; live rainfall adjusts the baseline hazard while terrain, soil, land cover, and geology remain from the local tensor.`
+        : 'Uses newly updated rainfall forecast with the baseline hazard and local Southern Leyte tensor before refreshing risk zones.',
+      tone: 'live',
+    }
+  }
+
+  if (firstName.startsWith('Rainfall Simulation')) {
+    return {
+      label: 'Rainfall Simulation',
+      source: 'User-defined rainfall scenario',
+      detail: 'Scenario layer generated from rainfall, duration, and saturation inputs.',
+      tone: 'scenario',
+    }
+  }
+
+  if (firstName.startsWith('Attention U-Net')) {
+    return {
+      label: 'Attention U-Net Prediction',
+      source: 'Local model checkpoint: attention_unet.pth',
+      detail: 'Model inference using Southern Leyte processed tensor inputs.',
+      tone: 'model',
+    }
+  }
+
+  return {
+    label: 'Risk Layer',
+    source: 'Loaded risk zone database',
+    detail: 'Current mapped risk zones from backend storage.',
+    tone: 'default',
+  }
+}
+
 function RiskBreakdownList({ breakdown }) {
   if (breakdown === null) {
     return <span>Loading barangay risk share...</span>
@@ -153,6 +212,7 @@ function RiskBreakdownList({ breakdown }) {
 }
 
 function BarangayInfoPanel({
+  activeLayerInfo,
   selectedBarangayRiskBreakdown,
   selectedBarangayFeature,
   selectedBarangayName,
@@ -165,6 +225,7 @@ function BarangayInfoPanel({
     return (
       <aside className="prediction-info-panel prediction-info-panel--empty">
         <div className="prediction-info-empty-copy">
+          <ActiveLayerBadge activeLayerInfo={activeLayerInfo} />
           <span className="prediction-info-kicker">Barangay details</span>
           <h4>Select a barangay</h4>
           <p>
@@ -179,6 +240,7 @@ function BarangayInfoPanel({
 
   return (
     <aside className="prediction-info-panel">
+      <ActiveLayerBadge activeLayerInfo={activeLayerInfo} />
       <span className="prediction-info-kicker">Barangay details</span>
       <div className="prediction-info-heading">
         <div>
@@ -217,6 +279,12 @@ function BarangayInfoPanel({
 
       <div className="prediction-info-section">
         <RiskBreakdownList breakdown={selectedBarangayRiskBreakdown} />
+      </div>
+
+      <div className="prediction-info-disclaimer">
+        <i className="ti ti-info-circle"></i>
+        Planning-support estimate only. Validate with LGU field reports and ground
+        observations before operational decisions.
       </div>
 
       {lossEstimate ? (
@@ -268,6 +336,15 @@ function BarangayInfoPanel({
         </p>
       )}
     </aside>
+  )
+}
+
+function ActiveLayerBadge({ activeLayerInfo }) {
+  return (
+    <div className={`active-layer-badge active-layer-badge--${activeLayerInfo.tone}`}>
+      <span>{activeLayerInfo.label}</span>
+      <strong>{activeLayerInfo.source}</strong>
+    </div>
   )
 }
 
@@ -532,6 +609,9 @@ function PredictionPage() {
   const [apiStatus, setApiStatus] = useState('checking')
   const [riskZones, setRiskZones] = useState(null)
   const [riskStatus, setRiskStatus] = useState('loading')
+  const [municipalityStatus, setMunicipalityStatus] = useState('loading')
+  const [selectedBoundaryStatus, setSelectedBoundaryStatus] = useState('loading')
+  const [baselineOverlayStatus, setBaselineOverlayStatus] = useState('idle')
   const [themeMode, setThemeMode] = useState(
     () => localStorage.getItem('sl-lps-theme') ?? 'light',
   )
@@ -541,6 +621,7 @@ function PredictionPage() {
   const [selectedMunicipalityName, setSelectedMunicipalityName] = useState('Bontoc')
   const [municipalityBoundaries, setMunicipalityBoundaries] = useState(null)
   const [provinceBoundary, setProvinceBoundary] = useState(null)
+  const [latestRunMetadata, setLatestRunMetadata] = useState(null)
   const [selectedMunicipalityBoundary, setSelectedMunicipalityBoundary] =
     useState(null)
   const [barangayBoundaries, setBarangayBoundaries] = useState(null)
@@ -575,8 +656,22 @@ function PredictionPage() {
     riskZones?.features?.filter((feature) =>
       ['75%', '100%', 'High'].includes(feature.properties.risk_level),
     ).length ?? 0
+  const activeLayerInfo = getActiveLayerInfo(riskZones, latestRunMetadata)
+  const shouldShowBaselineOverlay =
+    hasBaselineRiskLayer ||
+    activeLayerInfo.tone === 'model' ||
+    activeLayerInfo.tone === 'live' ||
+    activeLayerInfo.tone === 'scenario'
+  const riskLayerVersion =
+    riskZones?.features?.map((feature) => feature.properties.id).join('-') || 'empty'
+  const displayedBaselineOverlayVersion = hasBaselineRiskLayer
+    ? baselineOverlayVersion
+    : `baseline-underlay-${riskLayerVersion}`
   const isPreparingPrediction =
     riskStatus === 'loading' ||
+    municipalityStatus === 'loading' ||
+    selectedBoundaryStatus === 'loading' ||
+    baselineOverlayStatus === 'loading' ||
     predictionStatus === 'running' ||
     livePredictionStatus === 'running'
   const loaderTitle =
@@ -591,6 +686,89 @@ function PredictionPage() {
       : livePredictionStatus === 'running'
         ? 'Fetching newly updated rainfall data from the Open-Meteo Forecast API before updating risk zones'
         : 'Loading risk layers and municipality boundaries'
+  const loaderChecklist = [
+    {
+      label:
+        livePredictionStatus === 'running'
+          ? 'Rainfall source'
+          : predictionStatus === 'running'
+            ? 'Prediction engine'
+            : 'Prediction engine',
+      detail:
+        livePredictionStatus === 'running'
+          ? 'Open-Meteo + baseline hazard + tensor'
+          : 'Attention U-Net and local tensors',
+      status:
+        livePredictionStatus === 'running' || predictionStatus === 'running'
+          ? 'loading'
+          : livePredictionStatus === 'failed' || predictionStatus === 'failed'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Risk zones',
+      detail: 'Current mapped hazard layer',
+      status:
+        riskStatus === 'loading'
+          ? 'loading'
+          : riskStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Province boundary',
+      detail: 'Southern Leyte clipping mask',
+      status: provinceBoundary?.geometry
+        ? 'ready'
+        : riskStatus === 'unavailable'
+          ? 'error'
+          : 'loading',
+    },
+    {
+      label: 'Municipalities',
+      detail: 'Dropdown and map focus data',
+      status:
+        municipalityStatus === 'loading'
+          ? 'loading'
+          : municipalityStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Barangay boundaries',
+      detail: selectedMunicipalityName,
+      status:
+        selectedBoundaryStatus === 'loading'
+          ? 'loading'
+          : selectedBoundaryStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    ...(hasBaselineRiskLayer
+      ? [
+          {
+            label: 'Baseline overlay',
+            detail: 'Raster risk image',
+            status:
+              baselineOverlayStatus === 'loading'
+                ? 'loading'
+                : baselineOverlayStatus === 'unavailable'
+                  ? 'error'
+                  : 'ready',
+          },
+        ]
+      : []),
+  ]
+
+  function waitForMapPaint() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          window.setTimeout(resolve, 250)
+        })
+      })
+    })
+  }
 
   function scrollToPredictionMap() {
     window.setTimeout(() => {
@@ -625,10 +803,15 @@ function PredictionPage() {
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
         setRiskZones(response.data)
-        setRiskStatus('loaded')
-        return loadProvinceBoundary()
+        return loadProvinceBoundary().then(() => {
+          setRiskStatus('loaded')
+          return response.data
+        })
       })
-      .catch(() => setRiskStatus('unavailable'))
+      .catch((error) => {
+        setRiskStatus('unavailable')
+        throw error
+      })
   }
 
   function loadProvinceBoundary() {
@@ -646,25 +829,34 @@ function PredictionPage() {
   }, [])
 
   useEffect(() => {
-    loadRiskZones()
+    loadRiskZones().catch(() => undefined)
   }, [])
 
   useEffect(() => {
+    setMunicipalityStatus('loading')
+
     axios
       .get(`${API_BASE_URL}/municipality-boundaries`)
-      .then((response) => setMunicipalityBoundaries(response.data))
-      .catch(() => setMunicipalityBoundaries(null))
+      .then((response) => {
+        setMunicipalityBoundaries(response.data)
+        setMunicipalityStatus('loaded')
+      })
+      .catch(() => {
+        setMunicipalityBoundaries(null)
+        setMunicipalityStatus('unavailable')
+      })
   }, [])
 
   useEffect(() => {
     let isCurrentRequest = true
 
+    setSelectedBoundaryStatus('loading')
     setSelectedMunicipalityBoundary(null)
     setBarangayBoundaries(null)
     setSelectedBarangayName('')
     setSelectedBarangayRiskBreakdown([])
 
-    axios
+    const municipalityRequest = axios
       .get(
         `${API_BASE_URL}/municipality-boundary/${encodeURIComponent(
           selectedMunicipalityName,
@@ -681,7 +873,7 @@ function PredictionPage() {
         }
       })
 
-    axios
+    const barangaysRequest = axios
       .get(
         `${API_BASE_URL}/municipality-boundary/${encodeURIComponent(
           selectedMunicipalityName,
@@ -697,6 +889,12 @@ function PredictionPage() {
           setBarangayBoundaries(null)
         }
       })
+
+    Promise.allSettled([municipalityRequest, barangaysRequest]).then(() => {
+      if (isCurrentRequest) {
+        setSelectedBoundaryStatus('loaded')
+      }
+    })
 
     return () => {
       isCurrentRequest = false
@@ -722,6 +920,15 @@ function PredictionPage() {
       )
       .catch(() => setSelectedBarangayRiskBreakdown([]))
   }, [selectedBarangayName, selectedMunicipalityName])
+
+  useEffect(() => {
+    if (shouldShowBaselineOverlay) {
+      setBaselineOverlayStatus('loading')
+      return
+    }
+
+    setBaselineOverlayStatus('idle')
+  }, [displayedBaselineOverlayVersion, shouldShowBaselineOverlay])
 
   useEffect(() => {
     if (
@@ -750,7 +957,15 @@ function PredictionPage() {
 
     axios
       .post(`${API_BASE_URL}/predict`)
+      .then((response) =>
+        setLatestRunMetadata({
+          ...response.data,
+          layerType: 'model',
+          ranAt: new Date().toISOString(),
+        }),
+      )
       .then(() => loadRiskZones())
+      .then(() => waitForMapPaint())
       .then(() => setPredictionStatus('saved'))
       .catch(() => setPredictionStatus('failed'))
   }
@@ -761,7 +976,15 @@ function PredictionPage() {
 
     axios
       .post(`${API_BASE_URL}/restore-baseline-risk`)
+      .then((response) =>
+        setLatestRunMetadata({
+          ...response.data,
+          layerType: 'baseline',
+          ranAt: new Date().toISOString(),
+        }),
+      )
       .then(() => loadRiskZones())
+      .then(() => waitForMapPaint())
       .then(() => {
         setSelectedBarangayRiskBreakdown([])
         setPredictionStatus('baseline')
@@ -775,7 +998,15 @@ function PredictionPage() {
 
     axios
       .post(`${API_BASE_URL}/predict-live`)
+      .then((response) =>
+        setLatestRunMetadata({
+          ...response.data,
+          layerType: 'live',
+          ranAt: new Date().toISOString(),
+        }),
+      )
       .then(() => loadRiskZones())
+      .then(() => waitForMapPaint())
       .then(() => setLivePredictionStatus('saved'))
       .catch(() => setLivePredictionStatus('failed'))
   }
@@ -995,7 +1226,7 @@ function PredictionPage() {
             <div className="col-12">
               <div className="card prediction-map-card" id="prediction-risk-map">
                 <div className="card-header map-card-header bg-transparent px-4 py-3">
-                  <div>
+                  <div className="map-header-title">
                     <h3 className="h5 mb-0">Southern Leyte Risk Map</h3>
                     <small className="text-secondary">Geospatial risk layer</small>
                   </div>
@@ -1092,11 +1323,15 @@ function PredictionPage() {
 
                       <Marker position={markerPosition}></Marker>
 
-                      {hasBaselineRiskLayer && (
+                      {shouldShowBaselineOverlay && (
                         <ImageOverlay
                           bounds={BASELINE_RISK_IMAGE_BOUNDS}
+                          eventHandlers={{
+                            load: () => setBaselineOverlayStatus('loaded'),
+                            error: () => setBaselineOverlayStatus('unavailable'),
+                          }}
                           pane="baseline-risk-image"
-                          url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${baselineOverlayVersion}`}
+                          url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`}
                           opacity={1}
                         />
                       )}
@@ -1235,15 +1470,38 @@ function PredictionPage() {
                       <div className="prediction-loader" aria-live="polite">
                         <div className="prediction-loader-panel">
                           <span className="prediction-loader-ring"></span>
-                          <div>
+                          <div className="prediction-loader-content">
                             <strong>{loaderTitle}</strong>
                             <span>{loaderMessage}</span>
+                            <ul className="prediction-loader-checklist">
+                              {loaderChecklist.map((item) => (
+                                <li
+                                  key={item.label}
+                                  className={`prediction-loader-check prediction-loader-check--${item.status}`}
+                                >
+                                  <i
+                                    className={`ti ${
+                                      item.status === 'ready'
+                                        ? 'ti-check'
+                                        : item.status === 'error'
+                                          ? 'ti-alert-circle'
+                                          : 'ti-loader-2'
+                                    }`}
+                                  ></i>
+                                  <span>
+                                    <b>{item.label}</b>
+                                    <small>{item.detail}</small>
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
                           </div>
                         </div>
                       </div>
                     )}
                     </div>
                     <BarangayInfoPanel
+                      activeLayerInfo={activeLayerInfo}
                       selectedBarangayRiskBreakdown={selectedBarangayRiskBreakdown}
                       selectedBarangayFeature={selectedBarangayFeature}
                       selectedBarangayName={selectedBarangayName}
@@ -1259,6 +1517,8 @@ function PredictionPage() {
               <div className="row g-3">
                 <div className="col-12 col-lg-6 col-xxl-12">
                   <PredictionControls
+                    activeLayerInfo={activeLayerInfo}
+                    latestRunMetadata={latestRunMetadata}
                     predictionStatus={predictionStatus}
                     livePredictionStatus={livePredictionStatus}
                     resetBaselineMap={resetBaselineMap}
@@ -1268,7 +1528,10 @@ function PredictionPage() {
                 </div>
 
                 <div className="col-12 col-lg-6 col-xxl-12">
-                  <EstimatedLoss lossSummary={lossSummary} />
+                  <EstimatedLoss
+                    activeLayerInfo={activeLayerInfo}
+                    lossSummary={lossSummary}
+                  />
                 </div>
               </div>
             </div>
@@ -1325,6 +1588,8 @@ function SummaryCard({
 }
 
 function PredictionControls({
+  activeLayerInfo,
+  latestRunMetadata,
   predictionStatus,
   livePredictionStatus,
   resetBaselineMap,
@@ -1369,18 +1634,44 @@ function PredictionControls({
           {livePredictionStatus === 'running' ? 'Fetching...' : 'Run Live Prediction'}
         </button>
         <p className="prediction-source-note">
-          Gets newly updated rainfall data from the Open-Meteo Forecast API before
-          updating the live risk zones.
+          Gets newly updated rainfall data from the Open-Meteo Forecast API, applies
+          it over the baseline hazard and local Southern Leyte tensor, then updates
+          the live risk zones.
         </p>
         <p className={`predict-status predict-status--${livePredictionStatus}`}>
           Live feed: {livePredictionStatus}
         </p>
+
+        <div className="prediction-provenance">
+          <span className="prediction-info-section-title">Current Source</span>
+          <strong>{activeLayerInfo.label}</strong>
+          <span>{activeLayerInfo.source}</span>
+          <small>{activeLayerInfo.detail}</small>
+          {latestRunMetadata?.model && (
+            <small>
+              Model: {latestRunMetadata.model}
+              {latestRunMetadata.checkpoint
+                ? ` / ${latestRunMetadata.checkpoint}`
+                : ''}
+            </small>
+          )}
+          {latestRunMetadata?.inference_check?.sample_image && (
+            <small>
+              Input: {latestRunMetadata.inference_check.sample_image.includes('southern_leyte_demo_001.h5')
+                ? 'local Southern Leyte tensor'
+                : latestRunMetadata.inference_check.sample_image}
+            </small>
+          )}
+          {latestRunMetadata?.ranAt && (
+            <small>Updated: {formatRunTimestamp(latestRunMetadata.ranAt)}</small>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
-function EstimatedLoss({ lossSummary }) {
+function EstimatedLoss({ activeLayerInfo, lossSummary }) {
   return (
     <div className="card h-100">
       <div className="card-header bg-white px-4 py-3">
@@ -1402,6 +1693,23 @@ function EstimatedLoss({ lossSummary }) {
         <div className="loss-metric">
           <span>Mapped Area</span>
           <strong>{formatNumber(lossSummary?.area)} sq km</strong>
+        </div>
+        <div className="loss-context">
+          <span className="prediction-info-section-title">Estimate Context</span>
+          <p>
+            Provincial planning estimate based on the current{' '}
+            <strong>{activeLayerInfo.label}</strong> layer.
+          </p>
+          <dl>
+            <div>
+              <dt>Exposure inputs</dt>
+              <dd>Barangay population, OSM assets, and mapped risk area</dd>
+            </div>
+            <div>
+              <dt>Use level</dt>
+              <dd>Decision support, validation required before response action</dd>
+            </div>
+          </dl>
         </div>
       </div>
     </div>

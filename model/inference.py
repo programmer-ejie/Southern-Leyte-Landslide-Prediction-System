@@ -48,6 +48,11 @@ SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK = (
 )
 
 
+def _load_baseline_hazard_mask():
+    with h5py.File(SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK, "r") as f:
+        return f["mask"][:].astype("float32")
+
+
 @lru_cache(maxsize=1)
 def load_model():
     model = AttentionUNet(in_channels=14, out_channels=1)
@@ -173,8 +178,7 @@ def run_landslide_predictions(bounds=None):
 
 def run_baseline_hazard_predictions(bounds=None):
     """Return the curated 5-level Southern Leyte baseline hazard layer."""
-    with h5py.File(SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK, "r") as f:
-        mask = f["mask"][:].astype("float32")
+    mask = _load_baseline_hazard_mask()
 
     predictions = probability_mask_to_risk_wkts(
         mask,
@@ -218,10 +222,11 @@ def run_rainfall_simulation(
     risk_surface="rainfall_simulated_model_probability",
     scenario_metadata=None,
 ):
-    """Run a scenario by increasing the normalized rainfall channel before inference."""
+    """Run rainfall over the curated baseline hazard plus the local tensor model."""
     model = load_model()
     input_image = SOUTHERN_LEYTE_TENSOR if SOUTHERN_LEYTE_TENSOR.exists() else DEFAULT_SAMPLE_IMAGE
     image = load_h5_image(input_image).astype("float32")
+    baseline_hazard = _load_baseline_hazard_mask()
 
     total_rainfall_mm = max(float(rainfall_mm_per_hr), 0.0) * max(float(duration_hours), 0.0)
     saturation_factor = max(float(saturation_factor), 0.0)
@@ -233,9 +238,11 @@ def run_rainfall_simulation(
 
     sample_input = normalized_image_to_tensor(image)
     probability_mask = predict_probability_mask(model, sample_input)
-    probability_array = probability_mask.detach().cpu().numpy()
+    model_probability = probability_mask.detach().cpu().numpy().squeeze()
+    rainfall_adjustment = (1.0 - baseline_hazard) * scenario_pressure * 0.55
+    model_adjustment = model_probability * scenario_pressure * 0.25
     probability_array = (
-        probability_array + (1.0 - probability_array) * scenario_pressure * 0.82
+        baseline_hazard + rainfall_adjustment + model_adjustment
     ).clip(0.0, 1.0)
     display_threshold = adaptive_mask_threshold(probability_array)
     scenario_label = f"{total_rainfall_mm:.0f}mm/{duration_hours:.1f}h"
@@ -248,11 +255,11 @@ def run_rainfall_simulation(
         min_pixels=1,
         simplify_tolerance=0,
         band_specs=[
-            (1, "15%", f"{name_prefix} 15% Risk", 0.00, 0.15),
-            (2, "30%", f"{name_prefix} 30% Risk", 0.15, 0.30),
-            (3, "50%", f"{name_prefix} 50% Risk", 0.30, 0.50),
-            (4, "75%", f"{name_prefix} 75% Risk", 0.50, 0.75),
-            (5, "100%", f"{name_prefix} 100% Risk", 0.75, 1.00),
+            (1, "15%", f"{name_prefix} 15% Risk", 0.00, 0.225),
+            (2, "30%", f"{name_prefix} 30% Risk", 0.225, 0.40),
+            (3, "50%", f"{name_prefix} 50% Risk", 0.40, 0.625),
+            (4, "75%", f"{name_prefix} 75% Risk", 0.625, 0.875),
+            (5, "100%", f"{name_prefix} 100% Risk", 0.875, 1.01),
         ],
     )
     scenario = {
@@ -264,6 +271,9 @@ def run_rainfall_simulation(
         "scenario_pressure": scenario_pressure,
         "baseline_rainfall_mean": float(baseline_rainfall.mean()),
         "simulated_rainfall_mean": float(image[:, :, 3].mean()),
+        "baseline_hazard_mean": float(baseline_hazard.mean()),
+        "model_probability_mean": float(model_probability.mean()),
+        "blended_probability_mean": float(probability_array.mean()),
     }
     if scenario_metadata:
         scenario.update(scenario_metadata)
@@ -276,10 +286,10 @@ def run_rainfall_simulation(
             "sample_image": str(input_image),
             "risk_surface": risk_surface,
             "input_shape": list(sample_input.shape),
-            "output_shape": list(probability_mask.shape),
-            "mean_probability": float(probability_mask.mean().item()),
-            "max_probability": float(probability_mask.max().item()),
-            "min_probability": float(probability_mask.min().item()),
+            "output_shape": list(probability_array.shape),
+            "mean_probability": float(probability_array.mean()),
+            "max_probability": float(probability_array.max()),
+            "min_probability": float(probability_array.min()),
             "display_threshold": display_threshold,
             "predicted_pixel_count": int((probability_array >= display_threshold).sum()),
         },
@@ -300,7 +310,7 @@ def run_live_rainfall_prediction(bounds=None):
         saturation_factor=live_rainfall["saturation_factor"],
         bounds=bounds,
         name_prefix=f"Live Rainfall Prediction {scenario_label}",
-        risk_surface="live_rainfall_model_probability",
+        risk_surface="baseline_hazard_live_rainfall_model_probability",
         scenario_metadata={"live_weather": live_rainfall},
     )
 
