@@ -1,7 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 
+const AUTH_USER_KEY = 'sl-lps-auth-user'
+
+function getUserInitials() {
+  try {
+    const user = JSON.parse(localStorage.getItem(AUTH_USER_KEY) || 'null')
+    const firstInitial = user?.firstName?.trim()?.[0] || ''
+    const lastInitial = user?.lastName?.trim()?.[0] || ''
+    const initials = `${firstInitial}${lastInitial}`.toUpperCase()
+
+    return initials || 'SL'
+  } catch (_) {
+    return 'SL'
+  }
+}
+
 function AdminProfileMenu() {
   const [isOpen, setIsOpen] = useState(false)
+  const [initials, setInitials] = useState(() => getUserInitials())
   const menuRef = useRef(null)
 
   useEffect(() => {
@@ -15,6 +31,10 @@ function AdminProfileMenu() {
     return () => document.removeEventListener('mousedown', handleDocumentClick)
   }, [])
 
+  useEffect(() => {
+    setInitials(getUserInitials())
+  }, [])
+
   return (
     <li className="position-relative" ref={menuRef}>
       <button
@@ -24,7 +44,7 @@ function AdminProfileMenu() {
         aria-expanded={isOpen}
         aria-label="Open profile menu"
       >
-        <span className="avatar-initials rounded-circle">EJ</span>
+        <span className="avatar-initials rounded-circle">{initials}</span>
       </button>
 
       {isOpen ? (

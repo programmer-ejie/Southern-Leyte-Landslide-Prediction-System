@@ -1,11 +1,16 @@
 import os
 import json
 import sys
+import base64
+import hmac
+import hashlib
+import secrets
+import time
 from pathlib import Path
 from functools import lru_cache
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
@@ -57,6 +62,8 @@ app.add_middleware(
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
+JWT_SECRET = os.getenv("JWT_SECRET", "sl-lps-local-development-secret")
+JWT_EXPIRES_SECONDS = 60 * 60 * 8
 
 
 LOSS_ASSUMPTIONS = {
@@ -70,6 +77,136 @@ class RainfallSimulationRequest(BaseModel):
     rainfall_mm_per_hr: float = Field(ge=0, le=300)
     duration_hours: float = Field(ge=0, le=168)
     saturation_factor: float = Field(default=1.0, ge=0, le=2)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+ADMIN_USER = {
+    "email": "jtagud@southernleytestateu.edu.ph",
+    "password": "jtagud@2026",
+    "first_name": "Jorton",
+    "middle_name": None,
+    "last_name": "tagud",
+    "role": "admin",
+}
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        260_000,
+    ).hex()
+
+
+def verify_password(password: str, salt: str, password_hash: str) -> bool:
+    return secrets.compare_digest(hash_password(password, salt), password_hash)
+
+
+def user_response(row):
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "firstName": row["first_name"],
+        "middleName": row["middle_name"],
+        "lastName": row["last_name"],
+        "role": row["role"],
+    }
+
+
+def base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def create_access_token(user: dict) -> str:
+    now = int(time.time())
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "sub": str(user["id"]),
+        "email": user["email"],
+        "role": user["role"],
+        "iat": now,
+        "exp": now + JWT_EXPIRES_SECONDS,
+    }
+    signing_input = ".".join(
+        [
+            base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+            base64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+        ]
+    )
+    signature = hmac.new(
+        JWT_SECRET.encode("utf-8"),
+        signing_input.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"{signing_input}.{base64url_encode(signature)}"
+
+
+@app.on_event("startup")
+def prepare_auth_users():
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(ADMIN_USER["password"], salt)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    salt TEXT NOT NULL,
+                    first_name TEXT NOT NULL,
+                    middle_name TEXT NULL,
+                    last_name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'admin',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO users (
+                    email,
+                    password_hash,
+                    salt,
+                    first_name,
+                    middle_name,
+                    last_name,
+                    role
+                )
+                VALUES (
+                    :email,
+                    :password_hash,
+                    :salt,
+                    :first_name,
+                    :middle_name,
+                    :last_name,
+                    :role
+                )
+                ON CONFLICT (email) DO UPDATE SET
+                    password_hash = EXCLUDED.password_hash,
+                    salt = EXCLUDED.salt,
+                    first_name = EXCLUDED.first_name,
+                    middle_name = EXCLUDED.middle_name,
+                    last_name = EXCLUDED.last_name,
+                    role = EXCLUDED.role,
+                    updated_at = NOW();
+                """
+            ),
+            {
+                **ADMIN_USER,
+                "password_hash": password_hash,
+                "salt": salt,
+            },
+        )
 
 
 @app.get("/")
@@ -91,6 +228,45 @@ def db_health():
     return {
         "database": "connected",
         "postgis": postgis_version,
+    }
+
+
+@app.post("/auth/login")
+def login(request: LoginRequest):
+    email = request.email.strip().lower()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    email,
+                    password_hash,
+                    salt,
+                    first_name,
+                    middle_name,
+                    last_name,
+                    role
+                FROM users
+                WHERE lower(email) = :email
+                LIMIT 1;
+                """
+            ),
+            {"email": email},
+        ).mappings().first()
+
+    if row is None or not verify_password(
+        request.password,
+        row["salt"],
+        row["password_hash"],
+    ):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    return {
+        "message": "Login successful",
+        "accessToken": create_access_token(user_response(row)),
+        "user": user_response(row),
     }
 
 
