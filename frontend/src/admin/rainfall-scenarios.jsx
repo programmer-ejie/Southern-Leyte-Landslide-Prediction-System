@@ -1,19 +1,33 @@
 import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
+import {
+  GeoJSON,
+  ImageOverlay,
+  MapContainer,
+  Pane,
+  TileLayer,
+} from 'react-leaflet'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
 import AdminProfileMenu from './AdminProfileMenu'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
+const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
+const SOUTHERN_LEYTE_BOUNDS = [
+  [9.78, 124.68],
+  [10.66, 125.42],
+]
+const BASELINE_RISK_IMAGE_BOUNDS = [
+  [9.88, 124.62],
+  [10.55, 125.35],
+]
 
 const numberFormatter = new Intl.NumberFormat('en-PH', {
   maximumFractionDigits: 1,
 })
 
 const currencyFormatter = new Intl.NumberFormat('en-PH', {
-  style: 'currency',
-  currency: 'PHP',
   maximumFractionDigits: 0,
 })
 
@@ -41,7 +55,33 @@ function formatNumber(value) {
 }
 
 function formatPeso(value) {
-  return currencyFormatter.format(value ?? 0)
+  return `PHP ${currencyFormatter.format(value ?? 0)}`
+}
+
+const riskStyles = {
+  '100%': { color: '#7f1d1d', fillColor: '#dc2626', fillOpacity: 0.48, weight: 2 },
+  '75%': { color: '#b45309', fillColor: '#f97316', fillOpacity: 0.42, weight: 2 },
+  '50%': { color: '#a16207', fillColor: '#facc15', fillOpacity: 0.36, weight: 2 },
+  '30%': { color: '#4d7c0f', fillColor: '#84cc16', fillOpacity: 0.3, weight: 2 },
+  '15%': { color: '#166534', fillColor: '#22c55e', fillOpacity: 0.24, weight: 2 },
+  High: { color: '#991b1b', fillColor: '#ef4444', fillOpacity: 0.42, weight: 2 },
+  Medium: { color: '#b45309', fillColor: '#f59e0b', fillOpacity: 0.38, weight: 2 },
+  Low: { color: '#166534', fillColor: '#22c55e', fillOpacity: 0.32, weight: 2 },
+}
+
+const riskPaneByLevel = {
+  Low: 'risk-low',
+  Medium: 'risk-medium',
+  High: 'risk-high',
+  '15%': 'risk-15',
+  '30%': 'risk-30',
+  '50%': 'risk-50',
+  '75%': 'risk-75',
+  '100%': 'risk-100',
+}
+
+function getRiskStyle(feature) {
+  return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
 }
 
 function buildLossSummary(riskZones) {
@@ -105,6 +145,7 @@ function RainfallScenariosPage() {
   const [durationHours, setDurationHours] = useState(6)
   const [saturationFactor, setSaturationFactor] = useState(1)
   const [simulationLogs, setSimulationLogs] = useState([])
+  const [provinceBoundary, setProvinceBoundary] = useState(null)
 
   const lossSummary = useMemo(() => buildLossSummary(riskZones), [riskZones])
   const riskDistribution = useMemo(
@@ -120,12 +161,20 @@ function RainfallScenariosPage() {
     riskZones?.features?.filter((feature) =>
       ['75%', '100%', 'High'].includes(feature.properties.risk_level),
     ).length ?? 0
+  const hasBaselineRiskLayer = riskZones?.features?.some((feature) =>
+    feature.properties.name?.startsWith('Baseline Hazard'),
+  )
+  const baselineOverlayVersion =
+    riskZones?.features
+      ?.filter((feature) => feature.properties.name?.startsWith('Baseline Hazard'))
+      .map((feature) => feature.properties.id)
+      .join('-') || 'baseline'
   const intensityIndex = Math.min(
     100,
     Math.round(
       (Number(rainfallRate) / 300) * 55 +
         (Number(durationHours) / 168) * 25 +
-        (Number(saturationFactor) / 2) * 20,
+        (Number(saturationFactor) / 5) * 20,
     ),
   )
 
@@ -145,6 +194,13 @@ function RainfallScenariosPage() {
       })
   }
 
+  function loadProvinceBoundary() {
+    return axios
+      .get(`${API_BASE_URL}/province-boundary`)
+      .then((response) => setProvinceBoundary(response.data))
+      .catch(() => setProvinceBoundary(null))
+  }
+
   useEffect(() => {
     axios
       .get(`${API_BASE_URL}/health`)
@@ -153,7 +209,7 @@ function RainfallScenariosPage() {
   }, [])
 
   useEffect(() => {
-    loadRiskZones()
+    loadRiskZones().then(() => loadProvinceBoundary())
   }, [])
 
   useEffect(() => {
@@ -168,9 +224,13 @@ function RainfallScenariosPage() {
       .post(`${API_BASE_URL}/simulate-rainfall`, {
         rainfall_mm_per_hr: Number(rainfallRate),
         duration_hours: Number(durationHours),
-        saturation_factor: Number(saturationFactor),
+        saturation_factor: Math.min(Math.max(Number(saturationFactor) || 0, 0), 5),
       })
       .then(() => loadRiskZones())
+      .then((updatedRiskZones) => {
+        loadProvinceBoundary()
+        return updatedRiskZones
+      })
       .then((updatedRiskZones) => {
         const summary = buildLossSummary(updatedRiskZones)
         const hotspot = getDamageHotspot(updatedRiskZones)
@@ -260,7 +320,7 @@ function RainfallScenariosPage() {
           <li>
             <a className="nav-link active" href="/admin/rainfall-scenarios">
               <i className="ti ti-cloud-rain"></i>
-              <span className="nav-text">Rainfall Scenarios</span>
+              <span className="nav-text">Rainfall Simulation</span>
             </a>
           </li>
           <li>
@@ -306,7 +366,7 @@ function RainfallScenariosPage() {
 
         <div className="me-auto topbar-heading">
           <div className="small text-secondary">Southern Leyte</div>
-          <div className="fw-semibold">Rainfall Scenarios</div>
+          <div className="fw-semibold">Rainfall Simulation</div>
         </div>
 
         <ul className="list-unstyled d-flex align-items-center mb-0 gap-1">
@@ -347,10 +407,10 @@ function RainfallScenariosPage() {
           <div className="row">
             <div className="col-12">
               <div className="mb-6">
-                <span className="prediction-kicker">Simulation and impact logs</span>
-                <h1 className="fs-3 mb-1">Rainfall Scenarios</h1>
+                <span className="prediction-kicker">Scenario map and impact logs</span>
+                <h1 className="fs-3 mb-1">Rainfall Simulation</h1>
                 <p className="text-secondary mb-0">
-                  Run rainfall scenarios, review generated risk values, and identify
+                  Run rainfall scenarios, review generated risk maps, and identify
                   where estimated damage is highest.
                 </p>
               </div>
@@ -396,6 +456,93 @@ function RainfallScenariosPage() {
           </div>
 
           <div className="row g-3 mb-3">
+            <div className="col-12">
+              <div className="card prediction-map-card">
+                <div className="card-header map-card-header bg-transparent px-4 py-3">
+                  <div>
+                    <h4 className="mb-0 h5">Rainfall Simulation Map</h4>
+                    <p className="text-secondary mb-0">
+                      Simulated landslide risk layer generated from rainfall inputs.
+                    </p>
+                  </div>
+                  <span className={`predict-status predict-status--${riskStatus}`}>
+                    Risk layer: {riskStatus}
+                  </span>
+                </div>
+                <div className="card-body p-0">
+                  <div className="prediction-map-frame prediction-map-frame--simulation">
+                    <MapContainer
+                      center={SOUTHERN_LEYTE_POSITION}
+                      zoom={10}
+                      className="map-view"
+                      scrollWheelZoom
+                      maxBounds={SOUTHERN_LEYTE_BOUNDS}
+                      maxBoundsViscosity={1}
+                      minZoom={9}
+                    >
+                      <TileLayer
+                        attribution="&copy; OpenStreetMap contributors &copy; CARTO"
+                        url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png"
+                      />
+                      <Pane name="baseline-risk-image" style={{ zIndex: 490 }} />
+                      <Pane name="risk-low" style={{ zIndex: 500 }} />
+                      <Pane name="risk-medium" style={{ zIndex: 510 }} />
+                      <Pane name="risk-high" style={{ zIndex: 520 }} />
+                      <Pane name="risk-15" style={{ zIndex: 500 }} />
+                      <Pane name="risk-30" style={{ zIndex: 510 }} />
+                      <Pane name="risk-50" style={{ zIndex: 520 }} />
+                      <Pane name="risk-75" style={{ zIndex: 530 }} />
+                      <Pane name="risk-100" style={{ zIndex: 540 }} />
+                      <Pane name="province-boundary" style={{ zIndex: 560 }} />
+
+                      {hasBaselineRiskLayer && (
+                        <ImageOverlay
+                          bounds={BASELINE_RISK_IMAGE_BOUNDS}
+                          pane="baseline-risk-image"
+                          url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${baselineOverlayVersion}`}
+                          opacity={1}
+                        />
+                      )}
+
+                      {riskZones &&
+                        riskZones.features.map((feature) =>
+                          hasBaselineRiskLayer &&
+                          feature.properties.name?.startsWith('Baseline Hazard') ? null : (
+                            <GeoJSON
+                              key={`${feature.properties.id}-${feature.properties.risk_level}`}
+                              data={feature}
+                              pane={
+                                riskPaneByLevel[feature.properties.risk_level] ??
+                                'risk-low'
+                              }
+                              style={getRiskStyle}
+                            />
+                          ),
+                        )}
+
+                      {provinceBoundary?.geometry && (
+                        <GeoJSON
+                          key="simulation-province-boundary"
+                          data={provinceBoundary}
+                          pane="province-boundary"
+                          interactive={false}
+                          style={{
+                            className: 'province-boundary',
+                            color: '#111827',
+                            fillOpacity: 0,
+                            opacity: 1,
+                            weight: 4,
+                          }}
+                        />
+                      )}
+                    </MapContainer>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="row g-3 mb-3">
             <div className="col-12 col-xl-4">
               <div className="card h-100">
                 <div className="card-header bg-white px-4 py-3">
@@ -436,7 +583,7 @@ function RainfallScenariosPage() {
                     className="form-control mb-4"
                     type="number"
                     min="0"
-                    max="2"
+                    max="5"
                     step="0.1"
                     value={saturationFactor}
                     onChange={(event) => setSaturationFactor(event.target.value)}
@@ -449,7 +596,7 @@ function RainfallScenariosPage() {
                     disabled={simulationStatus === 'running'}
                   >
                     <i className="ti ti-player-play me-1"></i>
-                    {simulationStatus === 'running' ? 'Simulating...' : 'Run Scenario'}
+                    {simulationStatus === 'running' ? 'Simulating...' : 'Run Simulation'}
                   </button>
                   <p className={`predict-status predict-status--${simulationStatus}`}>
                     Simulation: {simulationStatus}
@@ -630,7 +777,7 @@ function RainfallScenariosPage() {
                   </span>
                 </div>
                 <div className="app-footer-meta">
-                  <span>Rainfall Scenarios</span>
+                  <span>Rainfall Simulation</span>
                   <span>2026</span>
                 </div>
               </footer>

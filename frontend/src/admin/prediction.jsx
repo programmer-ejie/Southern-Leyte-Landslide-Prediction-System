@@ -2,10 +2,10 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import {
   GeoJSON,
+  ImageOverlay,
   MapContainer,
   Marker,
   Pane,
-  Popup,
   TileLayer,
   useMap,
 } from 'react-leaflet'
@@ -19,6 +19,10 @@ const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
 const SOUTHERN_LEYTE_BOUNDS = [
   [9.78, 124.68],
   [10.66, 125.42],
+]
+const BASELINE_RISK_IMAGE_BOUNDS = [
+  [9.88, 124.62],
+  [10.55, 125.35],
 ]
 
 const MUNICIPALITIES = [
@@ -77,8 +81,6 @@ const riskLabelByLevel = {
 }
 
 const currencyFormatter = new Intl.NumberFormat('en-PH', {
-  style: 'currency',
-  currency: 'PHP',
   maximumFractionDigits: 0,
 })
 
@@ -87,15 +89,186 @@ const numberFormatter = new Intl.NumberFormat('en-PH', {
 })
 
 function getRiskStyle(feature) {
-  return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
+  const style = riskStyles[feature.properties.risk_level] ?? riskStyles.Low
+
+  if (feature.properties.name?.startsWith('Baseline Hazard')) {
+    return {
+      ...style,
+      color: style.fillColor,
+      fillColor: style.fillColor,
+      fillOpacity: 0.46,
+      opacity: 0.42,
+      stroke: true,
+      weight: 0.65,
+    }
+  }
+
+  return style
 }
 
 function formatPeso(value) {
-  return currencyFormatter.format(value ?? 0)
+  return `PHP ${currencyFormatter.format(value ?? 0)}`
 }
 
 function formatNumber(value) {
   return numberFormatter.format(value ?? 0)
+}
+
+function formatPercent(value) {
+  return `${formatNumber((value ?? 0) * 100)}%`
+}
+
+function formatRiskPercent(value) {
+  return `${formatNumber(value ?? 0)}%`
+}
+
+function RiskBreakdownList({ breakdown }) {
+  if (breakdown === null) {
+    return <span>Loading barangay risk share...</span>
+  }
+
+  if (!breakdown?.length) {
+    return <span>Risk breakdown: No barangay overlap data</span>
+  }
+
+  return (
+    <span className="prediction-popup-breakdown">
+      <span className="prediction-popup-breakdown-title">Barangay risk share</span>
+      {breakdown.map((item) => (
+        <span
+          className="prediction-popup-breakdown-row"
+          key={item.risk_level}
+        >
+          <span>
+            <span
+              className={`prediction-popup-swatch prediction-popup-swatch--${item.risk_level.replace('%', '')}`}
+            ></span>
+            {item.label}
+          </span>
+          <strong>{formatRiskPercent(item.percent)}</strong>
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function BarangayInfoPanel({
+  selectedBarangayRiskBreakdown,
+  selectedBarangayFeature,
+  selectedBarangayName,
+  selectedBarangayRisk,
+  selectedMunicipalityName,
+}) {
+  const lossEstimate = selectedBarangayRisk?.properties?.loss_estimate
+
+  if (!selectedBarangayName) {
+    return (
+      <aside className="prediction-info-panel prediction-info-panel--empty">
+        <div className="prediction-info-empty-copy">
+          <span className="prediction-info-kicker">Barangay details</span>
+          <h4>Select a barangay</h4>
+          <p>
+            Choose a barangay from the dropdown or click a colored area on the map
+            to view population, risk share, and exposure estimates.
+          </p>
+        </div>
+        <RiskLegend variant="panel" />
+      </aside>
+    )
+  }
+
+  return (
+    <aside className="prediction-info-panel">
+      <span className="prediction-info-kicker">Barangay details</span>
+      <div className="prediction-info-heading">
+        <div>
+          <h4>{selectedBarangayName}</h4>
+          <p>Barangay, {selectedMunicipalityName}</p>
+        </div>
+        <span className="prediction-info-risk">
+          {selectedBarangayRisk
+            ? (riskLabelByLevel[selectedBarangayRisk.properties.risk_level] ??
+              selectedBarangayRisk.properties.risk_level)
+            : 'No risk'}
+        </span>
+      </div>
+
+      <div className="prediction-info-metrics">
+        <div>
+          <span>Population</span>
+          <strong>
+            {selectedBarangayFeature?.properties?.population
+              ? formatNumber(selectedBarangayFeature.properties.population)
+              : 'No record'}
+          </strong>
+          {selectedBarangayFeature?.properties?.population_year && (
+            <small>{selectedBarangayFeature.properties.population_year}</small>
+          )}
+        </div>
+        <div>
+          <span>Probability</span>
+          <strong>
+            {selectedBarangayRisk
+              ? `${Math.round(selectedBarangayRisk.properties.probability * 100)}%`
+              : '-'}
+          </strong>
+        </div>
+      </div>
+
+      <div className="prediction-info-section">
+        <RiskBreakdownList breakdown={selectedBarangayRiskBreakdown} />
+      </div>
+
+      {lossEstimate ? (
+        <>
+          <div className="prediction-info-section">
+            <span className="prediction-info-section-title">Exposure estimate</span>
+            <dl className="prediction-info-list">
+              <div>
+                <dt>Mapped risk area</dt>
+                <dd>{formatNumber(lossEstimate.estimated_area_sq_km)} sq km</dd>
+              </div>
+              <div>
+                <dt>Exposed area share</dt>
+                <dd>{formatPercent(lossEstimate.exposure_area_fraction)}</dd>
+              </div>
+              <div>
+                <dt>Affected people</dt>
+                <dd>{formatNumber(lossEstimate.estimated_affected_people)}</dd>
+              </div>
+              <div>
+                <dt>Exposed asset value</dt>
+                <dd>{formatPeso(lossEstimate.exposed_asset_value_php)}</dd>
+              </div>
+              <div>
+                <dt>Economic loss</dt>
+                <dd>{formatPeso(lossEstimate.estimated_economic_loss_php)}</dd>
+              </div>
+              <div>
+                <dt>Damage ratio</dt>
+                <dd>{formatPercent(lossEstimate.damage_ratio)}</dd>
+              </div>
+              <div>
+                <dt>Possible casualties</dt>
+                <dd>{formatNumber(lossEstimate.estimated_possible_casualties)}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="prediction-info-section">
+            <span className="prediction-info-section-title">Recommendation</span>
+            <p className="prediction-info-recommendation">
+              {lossEstimate.recommendation}
+            </p>
+          </div>
+        </>
+      ) : (
+        <p className="prediction-info-recommendation">
+          No prediction value found for this barangay.
+        </p>
+      )}
+    </aside>
+  )
 }
 
 function buildLossSummary(riskZones) {
@@ -197,44 +370,97 @@ function findRiskAtPoint(point, riskZones) {
     })[0]
 }
 
-function bindRiskPopup(feature, layer, selectedBoundary) {
-  const {
-    name,
-    risk_level: riskLevel,
-    probability,
-    loss_estimate: lossEstimate,
-  } = feature.properties
+function riskFromBreakdown(breakdown) {
+  if (!breakdown?.length) {
+    return null
+  }
 
-  const lossDetails = lossEstimate
-    ? `
-      <hr />
-      Area: ${formatNumber(lossEstimate.estimated_area_sq_km)} sq km<br />
-      Estimated affected people: ${formatNumber(lossEstimate.estimated_affected_people)}<br />
-      Estimated economic loss: ${formatPeso(lossEstimate.estimated_economic_loss_php)}<br />
-      Possible casualties: ${formatNumber(lossEstimate.estimated_possible_casualties)}<br />
-      Recommendation: ${lossEstimate.recommendation}
-    `
-    : ''
+  const dominantRisk = [...breakdown].sort((a, b) => b.percent - a.percent)[0]
 
-  const popupContent = `
-    <strong>${name}</strong><br />
-    Risk: ${riskLabelByLevel[riskLevel] ?? riskLevel}<br />
-    Probability: ${Math.round(probability * 100)}%
-    ${lossDetails}
-  `
+  if (!dominantRisk || dominantRisk.percent <= 0) {
+    return null
+  }
 
+  return {
+    properties: {
+      risk_level: dominantRisk.risk_level,
+      probability: Number(dominantRisk.risk_level.replace('%', '')) / 100,
+      loss_estimate: null,
+    },
+  }
+}
+
+function selectMunicipalityFromMap(
+  point,
+  municipalityBoundaries,
+  selectedMunicipalityName,
+  setSelectedMunicipalityName,
+  setPendingBarangayClick,
+  setSelectedBarangayName,
+) {
+  const clickedMunicipality =
+    municipalityBoundaries?.features?.find((municipalityFeature) =>
+      isPointInsideFeature(point, municipalityFeature),
+    ) ?? null
+  const clickedMunicipalityName = clickedMunicipality?.properties?.name
+
+  if (!clickedMunicipalityName) {
+    return null
+  }
+
+  setPendingBarangayClick({
+    municipalityName: clickedMunicipalityName,
+    point: {
+      lat: point.lat,
+      lng: point.lng,
+    },
+  })
+
+  if (clickedMunicipalityName !== selectedMunicipalityName) {
+    setSelectedMunicipalityName(clickedMunicipalityName)
+    setSelectedBarangayName('')
+  }
+
+  return clickedMunicipalityName
+}
+
+function bindRiskPopup(
+  feature,
+  layer,
+  barangayBoundaries,
+  municipalityBoundaries,
+  selectedMunicipalityName,
+  setSelectedMunicipalityName,
+  setPendingBarangayClick,
+  setSelectedBarangayName,
+) {
   layer.on('click', (event) => {
-    if (
-      selectedBoundary &&
-      event.latlng &&
-      !isPointInsideFeature(event.latlng, selectedBoundary)
-    ) {
+    if (!event.latlng) {
       event.originalEvent?.preventDefault()
       event.originalEvent?.stopPropagation()
       return
     }
 
-    layer.bindPopup(popupContent).openPopup(event.latlng)
+    selectMunicipalityFromMap(
+      event.latlng,
+      municipalityBoundaries,
+      selectedMunicipalityName,
+      setSelectedMunicipalityName,
+      setPendingBarangayClick,
+      setSelectedBarangayName,
+    )
+
+    const clickedBarangay =
+      barangayBoundaries?.features?.find((barangayFeature) =>
+        isPointInsideFeature(event.latlng, barangayFeature),
+      ) ?? null
+    const clickedBarangayName = clickedBarangay?.properties?.name
+
+    if (clickedBarangayName) {
+      setSelectedBarangayName(clickedBarangayName)
+      setPendingBarangayClick(null)
+      return
+    }
   })
 }
 
@@ -266,7 +492,7 @@ function MapMunicipalityFocus({ municipality, boundary }) {
       animate: true,
       duration: 0.8,
     })
-  }, [boundary, map, municipality])
+  }, [boundary, map, municipality.name, municipality.position, municipality.zoom])
 
   return null
 }
@@ -311,17 +537,17 @@ function PredictionPage() {
   )
   const [predictionStatus, setPredictionStatus] = useState('idle')
   const [livePredictionStatus, setLivePredictionStatus] = useState('idle')
-  const [simulationStatus, setSimulationStatus] = useState('idle')
   const [showPredictionLoader, setShowPredictionLoader] = useState(true)
-  const [rainfallRate, setRainfallRate] = useState(20)
-  const [durationHours, setDurationHours] = useState(6)
-  const [saturationFactor, setSaturationFactor] = useState(1)
   const [selectedMunicipalityName, setSelectedMunicipalityName] = useState('Bontoc')
   const [municipalityBoundaries, setMunicipalityBoundaries] = useState(null)
+  const [provinceBoundary, setProvinceBoundary] = useState(null)
   const [selectedMunicipalityBoundary, setSelectedMunicipalityBoundary] =
     useState(null)
   const [barangayBoundaries, setBarangayBoundaries] = useState(null)
   const [selectedBarangayName, setSelectedBarangayName] = useState('')
+  const [pendingBarangayClick, setPendingBarangayClick] = useState(null)
+  const [selectedBarangayRiskBreakdown, setSelectedBarangayRiskBreakdown] =
+    useState([])
   const lossSummary = buildLossSummary(riskZones)
   const selectedMunicipality =
     MUNICIPALITIES.find(
@@ -333,8 +559,18 @@ function PredictionPage() {
       (feature) => feature.properties.name === selectedBarangayName,
     ) ?? null
   const selectedBarangayPoint = getFeatureBoundsCenter(selectedBarangayFeature)
-  const selectedBarangayRisk = findRiskAtPoint(selectedBarangayPoint, riskZones)
+  const pointSelectedBarangayRisk = findRiskAtPoint(selectedBarangayPoint, riskZones)
+  const selectedBarangayRisk =
+    pointSelectedBarangayRisk ?? riskFromBreakdown(selectedBarangayRiskBreakdown)
   const mappedZones = riskZones?.features?.length ?? 0
+  const hasBaselineRiskLayer = riskZones?.features?.some((feature) =>
+    feature.properties.name?.startsWith('Baseline Hazard'),
+  )
+  const baselineOverlayVersion =
+    riskZones?.features
+      ?.filter((feature) => feature.properties.name?.startsWith('Baseline Hazard'))
+      .map((feature) => feature.properties.id)
+      .join('-') || 'baseline'
   const highRiskZones =
     riskZones?.features?.filter((feature) =>
       ['75%', '100%', 'High'].includes(feature.properties.risk_level),
@@ -342,24 +578,27 @@ function PredictionPage() {
   const isPreparingPrediction =
     riskStatus === 'loading' ||
     predictionStatus === 'running' ||
-    livePredictionStatus === 'running' ||
-    simulationStatus === 'running'
+    livePredictionStatus === 'running'
   const loaderTitle =
     predictionStatus === 'running'
       ? 'Preparing prediction'
       : livePredictionStatus === 'running'
         ? 'Preparing live prediction'
-        : simulationStatus === 'running'
-          ? 'Preparing rainfall simulation'
-          : 'Loading prediction map'
+        : 'Loading prediction map'
   const loaderMessage =
     predictionStatus === 'running'
-      ? 'Running the model and refreshing risk layers'
+      ? 'Using the local Attention U-Net model and Southern Leyte baseline tensors to refresh risk zones'
       : livePredictionStatus === 'running'
-        ? 'Fetching live rainfall data before updating zones'
-        : simulationStatus === 'running'
-          ? 'Applying rainfall inputs to the risk map'
-          : 'Loading risk layers and municipality boundaries'
+        ? 'Fetching newly updated rainfall data from the Open-Meteo Forecast API before updating risk zones'
+        : 'Loading risk layers and municipality boundaries'
+
+  function scrollToPredictionMap() {
+    window.setTimeout(() => {
+      document
+        .getElementById('prediction-risk-map')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 80)
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
@@ -387,8 +626,16 @@ function PredictionPage() {
       .then((response) => {
         setRiskZones(response.data)
         setRiskStatus('loaded')
+        return loadProvinceBoundary()
       })
       .catch(() => setRiskStatus('unavailable'))
+  }
+
+  function loadProvinceBoundary() {
+    return axios
+      .get(`${API_BASE_URL}/province-boundary`)
+      .then((response) => setProvinceBoundary(response.data))
+      .catch(() => setProvinceBoundary(null))
   }
 
   useEffect(() => {
@@ -410,9 +657,12 @@ function PredictionPage() {
   }, [])
 
   useEffect(() => {
+    let isCurrentRequest = true
+
     setSelectedMunicipalityBoundary(null)
     setBarangayBoundaries(null)
     setSelectedBarangayName('')
+    setSelectedBarangayRiskBreakdown([])
 
     axios
       .get(
@@ -421,11 +671,15 @@ function PredictionPage() {
         )}`,
       )
       .then((response) => {
-        if (response.data?.geometry) {
+        if (isCurrentRequest && response.data?.geometry) {
           setSelectedMunicipalityBoundary(response.data)
         }
       })
-      .catch(() => setSelectedMunicipalityBoundary(null))
+      .catch(() => {
+        if (isCurrentRequest) {
+          setSelectedMunicipalityBoundary(null)
+        }
+      })
 
     axios
       .get(
@@ -433,12 +687,66 @@ function PredictionPage() {
           selectedMunicipalityName,
         )}/barangays`,
       )
-      .then((response) => setBarangayBoundaries(response.data))
-      .catch(() => setBarangayBoundaries(null))
+      .then((response) => {
+        if (isCurrentRequest) {
+          setBarangayBoundaries(response.data)
+        }
+      })
+      .catch(() => {
+        if (isCurrentRequest) {
+          setBarangayBoundaries(null)
+        }
+      })
+
+    return () => {
+      isCurrentRequest = false
+    }
   }, [selectedMunicipalityName])
+
+  useEffect(() => {
+    if (!selectedMunicipalityName || !selectedBarangayName) {
+      setSelectedBarangayRiskBreakdown([])
+      return
+    }
+
+    setSelectedBarangayRiskBreakdown(null)
+
+    axios
+      .get(
+        `${API_BASE_URL}/municipality-boundary/${encodeURIComponent(
+          selectedMunicipalityName,
+        )}/barangay/${encodeURIComponent(selectedBarangayName)}/risk-breakdown`,
+      )
+      .then((response) =>
+        setSelectedBarangayRiskBreakdown(response.data?.risk_breakdown ?? []),
+      )
+      .catch(() => setSelectedBarangayRiskBreakdown([]))
+  }, [selectedBarangayName, selectedMunicipalityName])
+
+  useEffect(() => {
+    if (
+      !pendingBarangayClick ||
+      pendingBarangayClick.municipalityName !== selectedMunicipalityName ||
+      !barangayBoundaries?.features?.length
+    ) {
+      return
+    }
+
+    const clickedBarangay =
+      barangayBoundaries.features.find((barangayFeature) =>
+        isPointInsideFeature(pendingBarangayClick.point, barangayFeature),
+      ) ?? null
+
+    if (clickedBarangay?.properties?.name) {
+      setSelectedBarangayName(clickedBarangay.properties.name)
+    }
+
+    setPendingBarangayClick(null)
+  }, [barangayBoundaries, pendingBarangayClick, selectedMunicipalityName])
 
   function runPrediction() {
     setPredictionStatus('running')
+    scrollToPredictionMap()
 
     axios
       .post(`${API_BASE_URL}/predict`)
@@ -447,28 +755,29 @@ function PredictionPage() {
       .catch(() => setPredictionStatus('failed'))
   }
 
+  function resetBaselineMap() {
+    setPredictionStatus('running')
+    scrollToPredictionMap()
+
+    axios
+      .post(`${API_BASE_URL}/restore-baseline-risk`)
+      .then(() => loadRiskZones())
+      .then(() => {
+        setSelectedBarangayRiskBreakdown([])
+        setPredictionStatus('baseline')
+      })
+      .catch(() => setPredictionStatus('failed'))
+  }
+
   function runLivePrediction() {
     setLivePredictionStatus('running')
+    scrollToPredictionMap()
 
     axios
       .post(`${API_BASE_URL}/predict-live`)
       .then(() => loadRiskZones())
       .then(() => setLivePredictionStatus('saved'))
       .catch(() => setLivePredictionStatus('failed'))
-  }
-
-  function runRainfallSimulation() {
-    setSimulationStatus('running')
-
-    axios
-      .post(`${API_BASE_URL}/simulate-rainfall`, {
-        rainfall_mm_per_hr: Number(rainfallRate),
-        duration_hours: Number(durationHours),
-        saturation_factor: Number(saturationFactor),
-      })
-      .then(() => loadRiskZones())
-      .then(() => setSimulationStatus('saved'))
-      .catch(() => setSimulationStatus('failed'))
   }
 
   return (
@@ -534,7 +843,7 @@ function PredictionPage() {
           <li>
             <a className="nav-link" href="/admin/rainfall-scenarios">
               <i className="ti ti-cloud-rain"></i>
-              <span className="nav-text">Rainfall Scenarios</span>
+              <span className="nav-text">Rainfall Simulation</span>
             </a>
           </li>
           <li>
@@ -683,8 +992,8 @@ function PredictionPage() {
           </div>
 
           <div className="row g-3">
-            <div className="col-12 col-xxl-8">
-              <div className="card prediction-map-card">
+            <div className="col-12">
+              <div className="card prediction-map-card" id="prediction-risk-map">
                 <div className="card-header map-card-header bg-transparent px-4 py-3">
                   <div>
                     <h3 className="h5 mb-0">Southern Leyte Risk Map</h3>
@@ -699,9 +1008,10 @@ function PredictionPage() {
                         id="municipality-select"
                         className="form-select form-select-sm"
                         value={selectedMunicipalityName}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          setPendingBarangayClick(null)
                           setSelectedMunicipalityName(event.target.value)
-                        }
+                        }}
                       >
                         {MUNICIPALITIES.map((municipality) => (
                           <option key={municipality.name} value={municipality.name}>
@@ -738,7 +1048,8 @@ function PredictionPage() {
                 </div>
 
                 <div className="card-body p-0">
-                  <div className="prediction-map-frame">
+                  <div className="prediction-map-layout">
+                    <div className="prediction-map-frame">
                     <MapContainer
                       center={SOUTHERN_LEYTE_POSITION}
                       zoom={10}
@@ -754,6 +1065,7 @@ function PredictionPage() {
                       keyboard={false}
                     >
                       <MapMunicipalityFocus
+                        key={selectedMunicipalityName}
                         municipality={selectedMunicipality}
                         boundary={selectedMunicipalityBoundary}
                       />
@@ -764,7 +1076,10 @@ function PredictionPage() {
                       />
 
                       <Pane name="barangay-boundaries" style={{ zIndex: 410 }} />
+                      <Pane name="municipality-clicks" style={{ zIndex: 430 }} />
                       <Pane name="municipality-labels" style={{ zIndex: 455 }} />
+                      <Pane name="baseline-risk-image" style={{ zIndex: 490 }} />
+                      <Pane name="barangay-boundary-lines" style={{ zIndex: 555 }} />
                       <Pane name="risk-low" style={{ zIndex: 500 }} />
                       <Pane name="risk-medium" style={{ zIndex: 510 }} />
                       <Pane name="risk-high" style={{ zIndex: 520 }} />
@@ -773,90 +1088,32 @@ function PredictionPage() {
                       <Pane name="risk-50" style={{ zIndex: 520 }} />
                       <Pane name="risk-75" style={{ zIndex: 530 }} />
                       <Pane name="risk-100" style={{ zIndex: 540 }} />
-                      <Pane name="selected-boundary" style={{ zIndex: 560 }} />
+                      <Pane name="province-boundary" style={{ zIndex: 560 }} />
 
-                      <Marker position={markerPosition}>
-                        <Popup>{selectedMunicipality.name} municipality</Popup>
-                      </Marker>
+                      <Marker position={markerPosition}></Marker>
 
-                      {selectedBarangayName && selectedBarangayPoint && (
-                        <Popup
-                          key={`${selectedBarangayName}-${selectedBarangayRisk?.properties?.id ?? 'none'}`}
-                          position={selectedBarangayPoint}
-                        >
-                          {selectedBarangayRisk ? (
-                            <div className="prediction-popup">
-                              <strong>{selectedBarangayRisk.properties.name}</strong>
-                              <br />
-                              Risk:{' '}
-                              {riskLabelByLevel[
-                                selectedBarangayRisk.properties.risk_level
-                              ] ?? selectedBarangayRisk.properties.risk_level}
-                              <br />
-                              Probability:{' '}
-                              {Math.round(
-                                selectedBarangayRisk.properties.probability * 100,
-                              )}
-                              %
-                              {selectedBarangayRisk.properties.loss_estimate && (
-                                <>
-                                  <hr />
-                                  Area:{' '}
-                                  {formatNumber(
-                                    selectedBarangayRisk.properties.loss_estimate
-                                      .estimated_area_sq_km,
-                                  )}{' '}
-                                  sq km
-                                  <br />
-                                  Estimated affected people:{' '}
-                                  {formatNumber(
-                                    selectedBarangayRisk.properties.loss_estimate
-                                      .estimated_affected_people,
-                                  )}
-                                  <br />
-                                  Estimated economic loss:{' '}
-                                  {formatPeso(
-                                    selectedBarangayRisk.properties.loss_estimate
-                                      .estimated_economic_loss_php,
-                                  )}
-                                  <br />
-                                  Possible casualties:{' '}
-                                  {formatNumber(
-                                    selectedBarangayRisk.properties.loss_estimate
-                                      .estimated_possible_casualties,
-                                  )}
-                                  <br />
-                                  Recommendation:{' '}
-                                  {
-                                    selectedBarangayRisk.properties.loss_estimate
-                                      .recommendation
-                                  }
-                                </>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="prediction-popup">
-                              <strong>{selectedBarangayName}</strong>
-                              <br />
-                              No prediction value found for this barangay.
-                            </div>
-                          )}
-                        </Popup>
+                      {hasBaselineRiskLayer && (
+                        <ImageOverlay
+                          bounds={BASELINE_RISK_IMAGE_BOUNDS}
+                          pane="baseline-risk-image"
+                          url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${baselineOverlayVersion}`}
+                          opacity={1}
+                        />
                       )}
 
-                      {selectedMunicipalityBoundary && (
+                      {provinceBoundary?.geometry && (
                         <GeoJSON
-                          key={selectedMunicipalityName}
-                          data={selectedMunicipalityBoundary}
-                          pane="selected-boundary"
+                          key="southern-leyte-province-boundary"
+                          data={provinceBoundary}
+                          pane="province-boundary"
                           interactive={false}
                           style={{
-                            className: 'selected-municipality-boundary',
-                            color: '#7c3aed',
-                            fillColor: '#a855f7',
-                            fillOpacity: 0.08,
-                            opacity: 0.96,
-                            weight: 4,
+                            className: 'province-boundary',
+                            color: '#111827',
+                            fillColor: '#111827',
+                            fillOpacity: 0,
+                            opacity: 1,
+                            weight: hasBaselineRiskLayer ? 3.5 : 4,
                           }}
                         />
                       )}
@@ -865,7 +1122,7 @@ function PredictionPage() {
                         <GeoJSON
                           key={`${selectedMunicipalityName}-barangays-${selectedBarangayName}`}
                           data={barangayBoundaries}
-                          pane="barangay-boundaries"
+                          pane="barangay-boundary-lines"
                           style={(barangayFeature) => {
                             const isSelected =
                               barangayFeature.properties.name === selectedBarangayName
@@ -874,21 +1131,15 @@ function PredictionPage() {
                               className: isSelected
                                 ? 'barangay-boundary barangay-boundary--selected'
                                 : 'barangay-boundary',
-                              color: isSelected ? '#111827' : '#6b7280',
-                              fillColor: isSelected ? '#111827' : '#ffffff',
-                              fillOpacity: isSelected ? 0.08 : 0,
-                              opacity: isSelected ? 1 : 0.82,
-                              weight: isSelected ? 3.4 : 1.2,
+                              color: isSelected ? '#2563eb' : '#000000',
+                              fillColor: isSelected ? '#2563eb' : '#ffffff',
+                              fillOpacity: isSelected ? 0.03 : 0,
+                              opacity: isSelected ? 1 : 0.95,
+                              weight: isSelected ? 1.7 : 1.15,
                             }
                           }}
                           onEachFeature={(barangayFeature, layer) => {
                             const barangayName = barangayFeature.properties.name
-
-                            layer.bindPopup(`
-                              <strong>${barangayName}</strong><br />
-                              Barangay, ${selectedMunicipalityName}
-                            `)
-
                             layer.on('click', () => {
                               setSelectedBarangayName(barangayName)
                             })
@@ -900,6 +1151,33 @@ function PredictionPage() {
                                 permanent: true,
                               })
                             }
+                          }}
+                        />
+                      )}
+
+                      {municipalityBoundaries?.features?.length > 0 && (
+                        <GeoJSON
+                          key="municipality-click-layer"
+                          data={municipalityBoundaries}
+                          pane="municipality-clicks"
+                          style={{
+                            color: 'transparent',
+                            fillColor: '#ffffff',
+                            fillOpacity: 0.001,
+                            opacity: 0,
+                            weight: 0,
+                          }}
+                          onEachFeature={(municipalityFeature, layer) => {
+                            layer.on('click', (event) => {
+                              selectMunicipalityFromMap(
+                                event.latlng,
+                                municipalityBoundaries,
+                                selectedMunicipalityName,
+                                setSelectedMunicipalityName,
+                                setPendingBarangayClick,
+                                setSelectedBarangayName,
+                              )
+                            })
                           }}
                         />
                       )}
@@ -927,22 +1205,30 @@ function PredictionPage() {
 
                       {riskZones &&
                         riskZones.features.map((feature) => (
-                          <GeoJSON
-                            key={`${selectedMunicipalityName}-${feature.properties.id}-${feature.properties.risk_level}`}
-                            data={feature}
-                            pane={
-                              riskPaneByLevel[feature.properties.risk_level] ??
-                              'risk-low'
-                            }
-                            style={getRiskStyle}
-                            onEachFeature={(riskFeature, layer) =>
-                              bindRiskPopup(
-                                riskFeature,
-                                layer,
-                                selectedMunicipalityBoundary,
-                              )
-                            }
-                          />
+                          hasBaselineRiskLayer &&
+                          feature.properties.name?.startsWith('Baseline Hazard') ? null : (
+                            <GeoJSON
+                              key={`${selectedMunicipalityName}-${barangayBoundaries?.features?.length ?? 0}-${feature.properties.id}-${feature.properties.risk_level}`}
+                              data={feature}
+                              pane={
+                                riskPaneByLevel[feature.properties.risk_level] ??
+                                'risk-low'
+                              }
+                              style={getRiskStyle}
+                              onEachFeature={(riskFeature, layer) =>
+                                bindRiskPopup(
+                                  riskFeature,
+                                  layer,
+                                  barangayBoundaries,
+                                  municipalityBoundaries,
+                                  selectedMunicipalityName,
+                                  setSelectedMunicipalityName,
+                                  setPendingBarangayClick,
+                                  setSelectedBarangayName,
+                                )
+                              }
+                            />
+                          )
                         ))}
                     </MapContainer>
                     {showPredictionLoader && (
@@ -956,6 +1242,14 @@ function PredictionPage() {
                         </div>
                       </div>
                     )}
+                    </div>
+                    <BarangayInfoPanel
+                      selectedBarangayRiskBreakdown={selectedBarangayRiskBreakdown}
+                      selectedBarangayFeature={selectedBarangayFeature}
+                      selectedBarangayName={selectedBarangayName}
+                      selectedBarangayRisk={selectedBarangayRisk}
+                      selectedMunicipalityName={selectedMunicipalityName}
+                    />
                   </div>
                 </div>
               </div>
@@ -967,30 +1261,14 @@ function PredictionPage() {
                   <PredictionControls
                     predictionStatus={predictionStatus}
                     livePredictionStatus={livePredictionStatus}
+                    resetBaselineMap={resetBaselineMap}
                     runPrediction={runPrediction}
                     runLivePrediction={runLivePrediction}
                   />
                 </div>
 
                 <div className="col-12 col-lg-6 col-xxl-12">
-                  <RainfallControls
-                    rainfallRate={rainfallRate}
-                    durationHours={durationHours}
-                    saturationFactor={saturationFactor}
-                    simulationStatus={simulationStatus}
-                    setRainfallRate={setRainfallRate}
-                    setDurationHours={setDurationHours}
-                    setSaturationFactor={setSaturationFactor}
-                    runRainfallSimulation={runRainfallSimulation}
-                  />
-                </div>
-
-                <div className="col-12 col-lg-6 col-xxl-12">
                   <EstimatedLoss lossSummary={lossSummary} />
-                </div>
-
-                <div className="col-12 col-lg-6 col-xxl-12">
-                  <RiskLegend />
                 </div>
               </div>
             </div>
@@ -1049,6 +1327,7 @@ function SummaryCard({
 function PredictionControls({
   predictionStatus,
   livePredictionStatus,
+  resetBaselineMap,
   runPrediction,
   runLivePrediction,
 }) {
@@ -1067,96 +1346,34 @@ function PredictionControls({
           <i className="ti ti-player-play me-1"></i>
           {predictionStatus === 'running' ? 'Predicting...' : 'Run Prediction'}
         </button>
+        <button
+          type="button"
+          className="btn btn-danger w-100 mt-3"
+          onClick={resetBaselineMap}
+          disabled={predictionStatus === 'running'}
+        >
+          <i className="ti ti-refresh me-1"></i>
+          Reset Map
+        </button>
         <p className={`predict-status predict-status--${predictionStatus}`}>
           Prediction: {predictionStatus}
         </p>
 
         <button
           type="button"
-          className="btn btn-outline-primary w-100 mt-3"
+          className="btn btn-primary w-100 mt-3"
           onClick={runLivePrediction}
           disabled={livePredictionStatus === 'running'}
         >
           <i className="ti ti-broadcast me-1"></i>
           {livePredictionStatus === 'running' ? 'Fetching...' : 'Run Live Prediction'}
         </button>
+        <p className="prediction-source-note">
+          Gets newly updated rainfall data from the Open-Meteo Forecast API before
+          updating the live risk zones.
+        </p>
         <p className={`predict-status predict-status--${livePredictionStatus}`}>
           Live feed: {livePredictionStatus}
-        </p>
-      </div>
-    </div>
-  )
-}
-
-function RainfallControls({
-  rainfallRate,
-  durationHours,
-  saturationFactor,
-  simulationStatus,
-  setRainfallRate,
-  setDurationHours,
-  setSaturationFactor,
-  runRainfallSimulation,
-}) {
-  return (
-    <div className="card h-100" id="rainfall">
-      <div className="card-header bg-white px-4 py-3">
-        <h4 className="mb-0 h5">Rainfall Simulation</h4>
-      </div>
-      <div className="card-body p-4">
-        <label className="form-label" htmlFor="rainfall-rate">
-          Rainfall mm/hr
-        </label>
-        <input
-          id="rainfall-rate"
-          className="form-control mb-3"
-          type="number"
-          min="0"
-          max="300"
-          step="1"
-          value={rainfallRate}
-          onChange={(event) => setRainfallRate(event.target.value)}
-        />
-
-        <label className="form-label" htmlFor="duration-hours">
-          Duration hours
-        </label>
-        <input
-          id="duration-hours"
-          className="form-control mb-3"
-          type="number"
-          min="0"
-          max="168"
-          step="1"
-          value={durationHours}
-          onChange={(event) => setDurationHours(event.target.value)}
-        />
-
-        <label className="form-label" htmlFor="saturation-factor">
-          Saturation factor
-        </label>
-        <input
-          id="saturation-factor"
-          className="form-control mb-3"
-          type="number"
-          min="0"
-          max="2"
-          step="0.1"
-          value={saturationFactor}
-          onChange={(event) => setSaturationFactor(event.target.value)}
-        />
-
-        <button
-          type="button"
-          className="btn btn-dark w-100"
-          onClick={runRainfallSimulation}
-          disabled={simulationStatus === 'running'}
-        >
-          <i className="ti ti-cloud-rain me-1"></i>
-          {simulationStatus === 'running' ? 'Simulating...' : 'Run Simulation'}
-        </button>
-        <p className={`predict-status predict-status--${simulationStatus}`}>
-          Simulation: {simulationStatus}
         </p>
       </div>
     </div>
@@ -1191,34 +1408,47 @@ function EstimatedLoss({ lossSummary }) {
   )
 }
 
-function RiskLegend() {
+function RiskLegend({ variant = 'card' }) {
+  const content = (
+    <div className="legend-list">
+      <div className="legend-row">
+        <span className="legend-swatch legend-swatch--high"></span>
+        Very High
+      </div>
+      <div className="legend-row">
+        <span className="legend-swatch legend-swatch--medium"></span>
+        High
+      </div>
+      <div className="legend-row">
+        <span className="legend-swatch legend-swatch--mid"></span>
+        Moderate
+      </div>
+      <div className="legend-row">
+        <span className="legend-swatch legend-swatch--low-mid"></span>
+        Slightly Low
+      </div>
+      <div className="legend-row">
+        <span className="legend-swatch legend-swatch--low"></span>
+        Low
+      </div>
+    </div>
+  )
+
+  if (variant === 'panel') {
+    return (
+      <div className="prediction-info-legend">
+        <span className="prediction-info-section-title">Risk Zones</span>
+        {content}
+      </div>
+    )
+  }
+
   return (
     <div className="card h-100">
       <div className="card-header bg-white px-4 py-3">
         <h4 className="mb-0 h5">Risk Zones</h4>
       </div>
-      <div className="card-body p-4">
-        <div className="legend-row">
-          <span className="legend-swatch legend-swatch--high"></span>
-          Very High
-        </div>
-        <div className="legend-row">
-          <span className="legend-swatch legend-swatch--medium"></span>
-          High
-        </div>
-        <div className="legend-row">
-          <span className="legend-swatch legend-swatch--mid"></span>
-          Moderate
-        </div>
-        <div className="legend-row">
-          <span className="legend-swatch legend-swatch--low-mid"></span>
-          Slightly Low
-        </div>
-        <div className="legend-row">
-          <span className="legend-swatch legend-swatch--low"></span>
-          Low
-        </div>
-      </div>
+      <div className="card-body p-4">{content}</div>
     </div>
   )
 }

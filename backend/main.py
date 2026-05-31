@@ -2,15 +2,20 @@ import os
 import json
 import sys
 import base64
+import csv
 import hmac
 import hashlib
+import io
 import secrets
 import time
 from pathlib import Path
 from functools import lru_cache
 
+import h5py
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
@@ -19,6 +24,12 @@ try:
     import shapefile
 except ImportError:  # pragma: no cover - depends on runtime environment
     shapefile = None
+
+try:
+    from shapely.geometry import box, mapping, shape as shapely_shape
+    from shapely.validation import make_valid as shapely_make_valid
+except ImportError:  # pragma: no cover - depends on runtime environment
+    box = mapping = shapely_shape = shapely_make_valid = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -40,8 +51,19 @@ BARANGAY_BOUNDARY_PATH = (
     / "boundary"
     / "gadm41_PHL_3.shp"
 )
+PROVINCE_BOUNDARY_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "southern_leyte"
+    / "boundary"
+    / "gadm41_PHL_1.shp"
+)
 
 from model.inference import (
+    MODEL_CHECKPOINT,
+    MODEL_NAME,
+    run_baseline_hazard_predictions,
     run_landslide_predictions,
     run_live_rainfall_prediction,
     run_rainfall_simulation,
@@ -66,17 +88,46 @@ JWT_SECRET = os.getenv("JWT_SECRET", "sl-lps-local-development-secret")
 JWT_EXPIRES_SECONDS = 60 * 60 * 8
 
 
-LOSS_ASSUMPTIONS = {
+EXPOSURE_DIR = PROJECT_ROOT / "data" / "raw" / "southern_leyte" / "exposure"
+LOSS_ESTIMATION_DIR = (
+    PROJECT_ROOT / "data" / "processed" / "southern_leyte" / "loss_estimation"
+)
+BARANGAY_POPULATION_PATH = EXPOSURE_DIR / "barangay_population.csv"
+ASSET_VALUES_PATH = EXPOSURE_DIR / "asset_values.csv"
+VULNERABILITY_RATES_PATH = EXPOSURE_DIR / "vulnerability_rates.csv"
+LOSS_EXPOSURE_SUMMARY_PATH = LOSS_ESTIMATION_DIR / "loss_exposure_summary.csv"
+
+FALLBACK_LOSS_ASSUMPTIONS = {
+    "province_area_sq_km": 1798.61,
+    "population_total": 429_573,
+    "estimated_total_asset_value_php": 42_887_219_240,
     "population_per_sq_km": 330,
     "asset_value_php_per_sq_km": 18_000_000,
-    "casualty_rate": 0.015,
+    "damage_ratio": 0.45,
+    "casualty_rate": 0.0075,
+}
+
+RISK_BREAKDOWN_LEVELS = ["15%", "30%", "50%", "75%", "100%"]
+BASELINE_HAZARD_MASK_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "southern_leyte"
+    / "masks"
+    / "southern_leyte_osm_manual_noah_5level_target.h5"
+)
+BASELINE_HAZARD_OVERLAY_BOUNDS = {
+    "min_lon": 124.62,
+    "min_lat": 9.88,
+    "max_lon": 125.35,
+    "max_lat": 10.55,
 }
 
 
 class RainfallSimulationRequest(BaseModel):
     rainfall_mm_per_hr: float = Field(ge=0, le=300)
     duration_hours: float = Field(ge=0, le=168)
-    saturation_factor: float = Field(default=1.0, ge=0, le=2)
+    saturation_factor: float = Field(default=1.0, ge=0, le=5)
 
 
 class LoginRequest(BaseModel):
@@ -231,6 +282,139 @@ def db_health():
     }
 
 
+@lru_cache(maxsize=1)
+def load_southern_leyte_province_boundary():
+    if shapefile is None or not PROVINCE_BOUNDARY_PATH.exists():
+        return None
+
+    reader = shapefile.Reader(str(PROVINCE_BOUNDARY_PATH))
+    fields = [field[0] for field in reader.fields[1:]]
+
+    for shape_record in reader.iterShapeRecords():
+        record = dict(zip(fields, shape_record.record))
+
+        if record.get("NAME_1") != "Southern Leyte":
+            continue
+
+        min_lon, min_lat, max_lon, max_lat = shape_record.shape.bbox
+        return {
+            "type": "Feature",
+            "properties": {
+                "name": "Southern Leyte",
+                "bounds": [[min_lat, min_lon], [max_lat, max_lon]],
+            },
+            "geometry": shape_record.shape.__geo_interface__,
+        }
+
+    return None
+
+
+def load_prediction_tile_boundary():
+    province = load_southern_leyte_province_boundary()
+
+    if (
+        province is None
+        or shapely_shape is None
+        or box is None
+        or mapping is None
+        or shapely_make_valid is None
+    ):
+        return province
+
+    min_lon = BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"]
+    min_lat = BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"]
+    max_lon = BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"]
+    max_lat = BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"]
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        ST_XMin(bounds) AS min_lon,
+                        ST_YMin(bounds) AS min_lat,
+                        ST_XMax(bounds) AS max_lon,
+                        ST_YMax(bounds) AS max_lat
+                    FROM (
+                        SELECT ST_Extent(geom)::box2d AS bounds
+                        FROM risk_zones
+                    ) AS risk_bounds
+                    WHERE bounds IS NOT NULL;
+                    """
+                )
+            ).mappings().first()
+
+        if row:
+            min_lon = float(row["min_lon"])
+            min_lat = float(row["min_lat"])
+            max_lon = float(row["max_lon"])
+            max_lat = float(row["max_lat"])
+    except Exception:
+        pass
+
+    tile_bounds = box(
+        min_lon,
+        min_lat,
+        max_lon,
+        max_lat,
+    )
+    clipped = shapely_make_valid(
+        shapely_shape(province["geometry"]).intersection(tile_bounds)
+    )
+
+    if clipped.is_empty:
+        return province
+
+    min_lon, min_lat, max_lon, max_lat = clipped.bounds
+    return {
+        "type": "Feature",
+        "properties": {
+            "name": "Southern Leyte prediction tile",
+            "bounds": [[min_lat, min_lon], [max_lat, max_lon]],
+        },
+        "geometry": mapping(clipped),
+    }
+
+
+def clip_feature_to_prediction_tile(feature):
+    if (
+        not feature
+        or shapely_shape is None
+        or box is None
+        or mapping is None
+        or shapely_make_valid is None
+    ):
+        return feature
+
+    try:
+        tile_bounds = box(
+            BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"],
+            BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"],
+            BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"],
+            BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"],
+        )
+        clipped = shapely_make_valid(
+            shapely_shape(feature["geometry"]).intersection(tile_bounds)
+        )
+    except Exception:
+        return feature
+
+    if clipped.is_empty:
+        return None
+
+    min_lon, min_lat, max_lon, max_lat = clipped.bounds
+    clipped_feature = {
+        **feature,
+        "properties": {
+            **feature.get("properties", {}),
+            "bounds": [[min_lat, min_lon], [max_lat, max_lon]],
+        },
+        "geometry": mapping(clipped),
+    }
+    return clipped_feature
+
+
 @app.post("/auth/login")
 def login(request: LoginRequest):
     email = request.email.strip().lower()
@@ -287,7 +471,7 @@ def load_southern_leyte_municipality_boundaries():
 
         name = record.get("NAME_2")
         min_lon, min_lat, max_lon, max_lat = shape_record.shape.bbox
-        boundaries[name.lower()] = {
+        feature = {
             "type": "Feature",
             "properties": {
                 "name": name,
@@ -296,8 +480,324 @@ def load_southern_leyte_municipality_boundaries():
             },
             "geometry": shape_record.shape.__geo_interface__,
         }
+        feature = clip_feature_to_prediction_tile(feature)
+
+        if feature is not None:
+            boundaries[name.lower()] = feature
 
     return boundaries
+
+
+def _normalize_place_name(value):
+    return " ".join(str(value or "").strip().lower().replace("city", "").split())
+
+
+def calculate_barangay_risk_breakdown(geometry):
+    if not geometry:
+        return []
+
+    if active_risk_surface() == "baseline":
+        return calculate_baseline_barangay_risk_breakdown(geometry)
+
+    return calculate_barangay_risk_breakdown_from_json(json.dumps(geometry))
+
+
+def active_risk_surface():
+    with engine.connect() as conn:
+        names = [
+            row["name"]
+            for row in conn.execute(
+                text("SELECT name FROM risk_zones ORDER BY name LIMIT 10;")
+            ).mappings().all()
+        ]
+
+    if names and all(name.startswith("Baseline Hazard") for name in names):
+        return "baseline"
+
+    return "vector"
+
+
+def baseline_hazard_classes():
+    with h5py.File(BASELINE_HAZARD_MASK_PATH, "r") as f:
+        mask = f["mask"][:].astype("float32")
+
+    classes = np.zeros(mask.shape, dtype=np.uint8)
+    class_specs = [
+        (1, mask <= 0.151),
+        (2, (mask > 0.151) & (mask < 0.49)),
+        (3, (mask >= 0.49) & (mask < 0.74)),
+        (4, (mask >= 0.74) & (mask < 0.99)),
+        (5, mask >= 0.99),
+    ]
+
+    for class_value, selector in class_specs:
+        classes[selector] = class_value
+
+    classes = np.asarray(
+        Image.fromarray(classes, mode="L").filter(ImageFilter.ModeFilter(size=3))
+    ).copy()
+    classes[classes == 0] = 1
+    return classes
+
+
+def calculate_baseline_barangay_risk_breakdown(geometry):
+    classes = baseline_hazard_classes()
+
+    barangay_mask = Image.new("L", classes.shape[::-1], 0)
+    draw = ImageDraw.Draw(barangay_mask)
+
+    def to_pixel(coordinate):
+        lon, lat = coordinate[:2]
+        x = (
+            (lon - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"])
+            / (
+                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"]
+                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"]
+            )
+            * (classes.shape[1] - 1)
+        )
+        y = (
+            (BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"] - lat)
+            / (
+                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"]
+                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"]
+            )
+            * (classes.shape[0] - 1)
+        )
+        return (x, y)
+
+    def draw_polygon_rings(rings):
+        if not rings:
+            return
+
+        draw.polygon([to_pixel(point) for point in rings[0]], fill=255)
+        for hole in rings[1:]:
+            draw.polygon([to_pixel(point) for point in hole], fill=0)
+
+    if geometry.get("type") == "Polygon":
+        draw_polygon_rings(geometry.get("coordinates", []))
+    elif geometry.get("type") == "MultiPolygon":
+        for polygon in geometry.get("coordinates", []):
+            draw_polygon_rings(polygon)
+
+    selected = np.asarray(barangay_mask) > 0
+    total_pixels = int(selected.sum())
+
+    if total_pixels == 0:
+        return []
+
+    specs = [
+        ("15%", "Low", classes == 1),
+        ("30%", "Slightly Low", classes == 2),
+        ("50%", "Moderate", classes == 3),
+        ("75%", "High", classes == 4),
+        ("100%", "Very High", classes == 5),
+    ]
+    barangay_area_sq_km = approximate_barangay_area_sq_km(geometry)
+    breakdown = []
+
+    for risk_level, label, selector in specs:
+        pixel_count = int((selected & selector).sum())
+        percent = round(pixel_count / total_pixels * 100.0, 1)
+        breakdown.append(
+            {
+                "risk_level": risk_level,
+                "label": label,
+                "area_sq_km": round(barangay_area_sq_km * percent / 100.0, 4),
+                "barangay_area_sq_km": round(barangay_area_sq_km, 4),
+                "percent": percent,
+            }
+        )
+
+    total_percent = sum(item["percent"] for item in breakdown)
+    if breakdown and total_percent:
+        adjustment = round(100.0 - total_percent, 1)
+        dominant_index = max(
+            range(len(breakdown)),
+            key=lambda index: breakdown[index]["percent"],
+        )
+        breakdown[dominant_index]["percent"] = round(
+            breakdown[dominant_index]["percent"] + adjustment,
+            1,
+        )
+
+    return breakdown
+
+
+def approximate_barangay_area_sq_km(geometry):
+    query = text(
+        """
+        SELECT ST_Area(
+            ST_Transform(
+                ST_SetSRID(ST_GeomFromGeoJSON(:geometry), 4326),
+                32651
+            )
+        ) / 1000000.0 AS area_sq_km;
+        """
+    )
+
+    with engine.connect() as conn:
+        return float(
+            conn.execute(
+                query,
+                {"geometry": json.dumps(geometry)},
+            ).scalar()
+            or 0
+        )
+
+
+@lru_cache(maxsize=1024)
+def calculate_barangay_risk_breakdown_from_json(geometry_json):
+    if not geometry_json:
+        return []
+
+    query = text(
+        """
+        WITH
+        barangay AS (
+            SELECT
+                ST_MakeValid(
+                    ST_Transform(
+                        ST_SetSRID(ST_GeomFromGeoJSON(:geometry), 4326),
+                        32651
+                    )
+                ) AS geom
+        ),
+        levels(label, level_order) AS (
+            VALUES
+                ('15%', 1),
+                ('30%', 2),
+                ('50%', 3),
+                ('75%', 4),
+                ('100%', 5)
+        ),
+        risk_geometries AS (
+            SELECT
+                CASE risk_level
+                    WHEN 'Low' THEN '30%'
+                    WHEN 'Medium' THEN '50%'
+                    WHEN 'High' THEN '75%'
+                    ELSE risk_level
+                END AS label,
+                ST_MakeValid(ST_Transform(geom, 32651)) AS geom
+            FROM risk_zones
+            WHERE risk_level IN ('15%', '30%', '50%', '75%', '100%', 'Low', 'Medium', 'High')
+        ),
+        risk_unions AS (
+            SELECT
+                levels.label,
+                levels.level_order,
+                ST_UnaryUnion(ST_Collect(risk_geometries.geom)) AS geom
+            FROM levels
+            JOIN risk_geometries ON risk_geometries.label = levels.label
+            GROUP BY levels.label, levels.level_order
+        ),
+        visible_risk AS (
+            SELECT
+                risk_unions.label,
+                risk_unions.level_order,
+                ST_Difference(
+                    risk_unions.geom,
+                    COALESCE(
+                        (
+                            SELECT ST_UnaryUnion(ST_Collect(higher.geom))
+                            FROM risk_unions higher
+                            WHERE higher.level_order > risk_unions.level_order
+                        ),
+                        ST_SetSRID(ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), 32651)
+                    )
+                ) AS geom
+            FROM risk_unions
+        ),
+        barangay_area AS (
+            SELECT GREATEST(ST_Area(geom), 1.0) AS area_m2 FROM barangay
+        ),
+        intersected AS (
+            SELECT
+                visible_risk.label,
+                visible_risk.level_order,
+                ST_Area(ST_Intersection(visible_risk.geom, barangay.geom)) AS area_m2
+            FROM visible_risk
+            CROSS JOIN barangay
+            WHERE ST_Intersects(visible_risk.geom, barangay.geom)
+        )
+        SELECT
+            levels.label,
+            COALESCE(SUM(intersected.area_m2), 0) / 1000000.0 AS area_sq_km,
+            barangay_area.area_m2 / 1000000.0 AS barangay_area_sq_km,
+            COALESCE(SUM(intersected.area_m2), 0) / barangay_area.area_m2 * 100.0 AS percent
+        FROM levels
+        CROSS JOIN barangay_area
+        LEFT JOIN intersected ON intersected.label = levels.label
+        GROUP BY levels.label, levels.level_order, barangay_area.area_m2
+        ORDER BY levels.level_order;
+        """
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            query,
+            {"geometry": geometry_json},
+        ).mappings().all()
+
+    breakdown = [
+        {
+            "risk_level": row["label"],
+            "label": {
+                "15%": "Low",
+                "30%": "Slightly Low",
+                "50%": "Moderate",
+                "75%": "High",
+                "100%": "Very High",
+            }.get(row["label"], row["label"]),
+            "area_sq_km": round(float(row["area_sq_km"] or 0), 4),
+            "barangay_area_sq_km": round(float(row["barangay_area_sq_km"] or 0), 4),
+            "percent": round(float(row["percent"] or 0), 1),
+        }
+        for row in rows
+    ]
+    covered_percent = sum(item["percent"] for item in breakdown)
+
+    if breakdown and 0 <= covered_percent < 99.9:
+        remainder = round(100.0 - covered_percent, 1)
+        barangay_area_sq_km = breakdown[0].get("barangay_area_sq_km", 0)
+        breakdown[0]["percent"] = round(breakdown[0]["percent"] + remainder, 1)
+        breakdown[0]["area_sq_km"] = round(
+            breakdown[0]["area_sq_km"] + barangay_area_sq_km * remainder / 100.0,
+            4,
+        )
+
+    total_percent = sum(item["percent"] for item in breakdown)
+    if breakdown and total_percent:
+        adjustment = round(100.0 - total_percent, 1)
+        breakdown[-1]["percent"] = round(breakdown[-1]["percent"] + adjustment, 1)
+
+    return breakdown
+
+
+@lru_cache(maxsize=1)
+def load_barangay_population_lookup():
+    population_rows = _read_csv_rows(BARANGAY_POPULATION_PATH)
+    lookup = {}
+
+    for row in population_rows:
+        municipality = _normalize_place_name(row.get("municipality"))
+        barangay = _normalize_place_name(row.get("barangay"))
+
+        if not municipality or not barangay:
+            continue
+
+        lookup[(municipality, barangay)] = {
+            "population": int(round(_to_float(row.get("population")))),
+            "households": row.get("households") or None,
+            "year": int(round(_to_float(row.get("year"))))
+            if row.get("year")
+            else None,
+            "source": row.get("source") or None,
+            "source_url": row.get("source_url") or None,
+        }
+
+    return lookup
 
 
 @app.get("/municipality-boundary/{municipality_name}")
@@ -324,6 +824,19 @@ def municipality_boundaries():
     }
 
 
+@app.get("/province-boundary")
+def province_boundary():
+    boundary = load_prediction_tile_boundary()
+
+    if boundary is None:
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+
+    return boundary
+
+
 @lru_cache(maxsize=1)
 def load_southern_leyte_barangay_boundaries():
     if shapefile is None or not BARANGAY_BOUNDARY_PATH.exists():
@@ -332,6 +845,7 @@ def load_southern_leyte_barangay_boundaries():
     reader = shapefile.Reader(str(BARANGAY_BOUNDARY_PATH))
     fields = [field[0] for field in reader.fields[1:]]
     barangays_by_municipality = {}
+    population_lookup = load_barangay_population_lookup()
 
     for shape_record in reader.iterShapeRecords():
         record = dict(zip(fields, shape_record.record))
@@ -341,6 +855,13 @@ def load_southern_leyte_barangay_boundaries():
 
         municipality_name = record.get("NAME_2")
         barangay_name = record.get("NAME_3")
+        population = population_lookup.get(
+            (
+                _normalize_place_name(municipality_name),
+                _normalize_place_name(barangay_name),
+            ),
+            {},
+        )
         min_lon, min_lat, max_lon, max_lat = shape_record.shape.bbox
         feature = {
             "type": "Feature",
@@ -348,9 +869,17 @@ def load_southern_leyte_barangay_boundaries():
                 "name": barangay_name,
                 "municipality": municipality_name,
                 "bounds": [[min_lat, min_lon], [max_lat, max_lon]],
+                "population": population.get("population"),
+                "population_year": population.get("year"),
+                "population_source": population.get("source"),
+                "population_source_url": population.get("source_url"),
             },
             "geometry": shape_record.shape.__geo_interface__,
         }
+        feature = clip_feature_to_prediction_tile(feature)
+
+        if feature is None:
+            continue
 
         barangays_by_municipality.setdefault(municipality_name.lower(), []).append(
             feature
@@ -369,56 +898,356 @@ def municipality_barangays(municipality_name: str):
     }
 
 
+@app.get("/municipality-boundary/{municipality_name}/barangay/{barangay_name}/risk-breakdown")
+def barangay_risk_breakdown(municipality_name: str, barangay_name: str):
+    barangays_by_municipality = load_southern_leyte_barangay_boundaries()
+    normalized_barangay_name = _normalize_place_name(barangay_name)
+    barangay = next(
+        (
+            feature
+            for feature in barangays_by_municipality.get(municipality_name.lower(), [])
+            if _normalize_place_name(feature["properties"].get("name"))
+            == normalized_barangay_name
+        ),
+        None,
+    )
+
+    if barangay is None:
+        raise HTTPException(status_code=404, detail="Barangay not found.")
+
+    return {
+        "municipality": municipality_name,
+        "barangay": barangay["properties"].get("name"),
+        "risk_breakdown": calculate_barangay_risk_breakdown(
+            barangay.get("geometry")
+        ),
+    }
+
+
 @app.get("/model-health")
 def model_health():
     return {
-        "model": "U-Net V3",
+        "model": MODEL_NAME,
+        "checkpoint": MODEL_CHECKPOINT,
         "status": "loaded",
         "inference_check": run_sample_inference(),
     }
 
 
+def _read_first_csv_row(path):
+    if not path.exists():
+        return None
+
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        return next(csv.DictReader(f), None)
+
+
+def _read_csv_rows(path):
+    if not path.exists():
+        return []
+
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _to_float(value, fallback=0.0):
+    try:
+        if value in (None, ""):
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+@lru_cache(maxsize=1)
+def load_loss_exposure_data():
+    summary = _read_first_csv_row(LOSS_EXPOSURE_SUMMARY_PATH) or {}
+    barangay_rows = _read_csv_rows(BARANGAY_POPULATION_PATH)
+    asset_rows = _read_csv_rows(ASSET_VALUES_PATH)
+    vulnerability_rows = _read_csv_rows(VULNERABILITY_RATES_PATH)
+
+    population_total = _to_float(
+        summary.get("population_total"),
+        sum(_to_float(row.get("population")) for row in barangay_rows),
+    )
+    total_asset_value = _to_float(
+        summary.get("estimated_total_asset_value_php"),
+        sum(_to_float(row.get("estimated_total_value_php")) for row in asset_rows),
+    )
+    province_area_sq_km = _to_float(
+        summary.get("province_area_sq_km"),
+        FALLBACK_LOSS_ASSUMPTIONS["province_area_sq_km"],
+    )
+
+    vulnerability_by_level = {
+        row.get("risk_level"): {
+            "damage_ratio": _to_float(row.get("damage_ratio")),
+            "casualty_rate": _to_float(row.get("casualty_rate")),
+            "source": row.get("source") or "vulnerability_rates.csv",
+        }
+        for row in vulnerability_rows
+        if row.get("risk_level")
+    }
+
+    return {
+        "province_area_sq_km": province_area_sq_km
+        or FALLBACK_LOSS_ASSUMPTIONS["province_area_sq_km"],
+        "population_total": population_total
+        or FALLBACK_LOSS_ASSUMPTIONS["population_total"],
+        "estimated_total_asset_value_php": total_asset_value
+        or FALLBACK_LOSS_ASSUMPTIONS["estimated_total_asset_value_php"],
+        "population_rows": len(barangay_rows),
+        "asset_rows": asset_rows,
+        "vulnerability_by_level": vulnerability_by_level,
+        "summary_path": str(LOSS_EXPOSURE_SUMMARY_PATH),
+        "population_path": str(BARANGAY_POPULATION_PATH),
+        "asset_values_path": str(ASSET_VALUES_PATH),
+        "vulnerability_rates_path": str(VULNERABILITY_RATES_PATH),
+        "loaded_from_files": all(
+            [
+                BARANGAY_POPULATION_PATH.exists(),
+                ASSET_VALUES_PATH.exists(),
+                VULNERABILITY_RATES_PATH.exists(),
+                LOSS_EXPOSURE_SUMMARY_PATH.exists(),
+            ]
+        ),
+    }
+
+
+def vulnerability_for_risk_level(risk_level, probability):
+    exposure_data = load_loss_exposure_data()
+    normalized_level = {
+        "Low": "30%",
+        "Medium": "50%",
+        "High": "75%",
+    }.get(risk_level, risk_level)
+
+    if normalized_level in exposure_data["vulnerability_by_level"]:
+        return normalized_level, exposure_data["vulnerability_by_level"][normalized_level]
+
+    probability_value = max(min(float(probability or 0), 1.0), 0.0)
+    fallback_level = (
+        "100%"
+        if probability_value >= 0.75
+        else "75%"
+        if probability_value >= 0.50
+        else "50%"
+        if probability_value >= 0.30
+        else "30%"
+        if probability_value >= 0.15
+        else "15%"
+    )
+
+    return fallback_level, exposure_data["vulnerability_by_level"].get(
+        fallback_level,
+        {
+            "damage_ratio": FALLBACK_LOSS_ASSUMPTIONS["damage_ratio"],
+            "casualty_rate": FALLBACK_LOSS_ASSUMPTIONS["casualty_rate"],
+            "source": "fallback backend assumptions",
+        },
+    )
+
+
+@app.get("/loss-exposure-summary")
+def loss_exposure_summary():
+    return load_loss_exposure_data()
+
+
+def baseline_hazard_overlay_png():
+    if not BASELINE_HAZARD_MASK_PATH.exists():
+        raise FileNotFoundError(BASELINE_HAZARD_MASK_PATH)
+
+    with h5py.File(BASELINE_HAZARD_MASK_PATH, "r") as f:
+        mask = f["mask"][:].astype("float32")
+
+    classes = np.zeros(mask.shape, dtype=np.uint8)
+    class_specs = [
+        (1, mask <= 0.151),
+        (2, (mask > 0.151) & (mask < 0.49)),
+        (3, (mask >= 0.49) & (mask < 0.74)),
+        (4, (mask >= 0.74) & (mask < 0.99)),
+        (5, mask >= 0.99),
+    ]
+
+    for class_value, selector in class_specs:
+        classes[selector] = class_value
+
+    classes = np.asarray(
+        Image.fromarray(classes, mode="L").filter(ImageFilter.ModeFilter(size=3))
+    ).copy()
+    classes[classes == 0] = 1
+
+    rgba = np.zeros((*classes.shape, 4), dtype=np.uint8)
+    fill_colors = {
+        1: (74, 222, 128, 142),
+        2: (163, 230, 53, 154),
+        3: (253, 224, 71, 168),
+        4: (251, 146, 60, 178),
+        5: (239, 68, 68, 188),
+    }
+
+    for class_value, color in fill_colors.items():
+        rgba[classes == class_value] = color
+
+    class_edges = np.zeros(classes.shape, dtype=bool)
+    class_edges[:-1, :] |= classes[:-1, :] != classes[1:, :]
+    class_edges[1:, :] |= classes[:-1, :] != classes[1:, :]
+    class_edges[:, :-1] |= classes[:, :-1] != classes[:, 1:]
+    class_edges[:, 1:] |= classes[:, :-1] != classes[:, 1:]
+
+    edge_colors = {
+        1: (47, 125, 50, 220),
+        2: (95, 138, 24, 220),
+        3: (180, 116, 16, 230),
+        4: (176, 78, 12, 230),
+        5: (127, 29, 29, 235),
+    }
+    for class_value, color in edge_colors.items():
+        rgba[class_edges & (classes == class_value)] = color
+
+    image_size = 1024
+    image = Image.fromarray(rgba, mode="RGBA")
+    image = image.resize((image_size, image_size), Image.Resampling.NEAREST)
+    rgba = np.asarray(image).copy()
+
+    boundary_mask = Image.new("L", (image_size, image_size), 0)
+    draw = ImageDraw.Draw(boundary_mask)
+    province = load_southern_leyte_province_boundary()
+
+    def to_pixel(coordinate):
+        lon, lat = coordinate[:2]
+        x = (
+            (lon - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"])
+            / (
+                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"]
+                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"]
+            )
+            * (image_size - 1)
+        )
+        y = (
+            (BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"] - lat)
+            / (
+                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"]
+                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"]
+            )
+            * (image_size - 1)
+        )
+        return (x, y)
+
+    def draw_polygon_rings(rings):
+        if not rings:
+            return
+
+        draw.polygon([to_pixel(point) for point in rings[0]], fill=255)
+        for hole in rings[1:]:
+            draw.polygon([to_pixel(point) for point in hole], fill=0)
+
+    geometry = province.get("geometry") if province else None
+    if geometry:
+        if geometry.get("type") == "Polygon":
+            draw_polygon_rings(geometry.get("coordinates", []))
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in geometry.get("coordinates", []):
+                draw_polygon_rings(polygon)
+
+    rgba[:, :, 3] = (
+        rgba[:, :, 3].astype("float32")
+        * (np.asarray(boundary_mask).astype("float32") / 255.0)
+    ).astype("uint8")
+
+    image = Image.fromarray(rgba, mode="RGBA")
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+@app.get("/baseline-risk-overlay.png")
+def baseline_risk_overlay():
+    try:
+        image_bytes = baseline_hazard_overlay_png()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Baseline hazard mask not found.")
+
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
 def estimate_loss(probability, risk_level, area_sq_km):
-    severity_multiplier = {
-        "15%": 0.15,
-        "30%": 0.30,
-        "50%": 0.50,
-        "75%": 0.75,
-        "100%": 1.00,
-        "Low": 0.25,
-        "Medium": 0.55,
-        "High": 0.85,
-    }.get(risk_level, max(min(float(probability), 1.0), 0.0))
-
-    affected_population = area_sq_km * LOSS_ASSUMPTIONS["population_per_sq_km"]
-    economic_loss = (
-        area_sq_km
-        * LOSS_ASSUMPTIONS["asset_value_php_per_sq_km"]
-        * severity_multiplier
+    exposure_data = load_loss_exposure_data()
+    vulnerability_level, vulnerability = vulnerability_for_risk_level(
+        risk_level,
+        probability,
     )
-    possible_casualties = (
-        affected_population
-        * severity_multiplier
-        * LOSS_ASSUMPTIONS["casualty_rate"]
+    province_area_sq_km = max(exposure_data["province_area_sq_km"], 1)
+    area_fraction = max(min(float(area_sq_km or 0) / province_area_sq_km, 1.0), 0.0)
+    exposed_population = exposure_data["population_total"] * area_fraction
+    exposed_asset_value = (
+        exposure_data["estimated_total_asset_value_php"] * area_fraction
     )
+    damage_ratio = max(min(vulnerability["damage_ratio"], 1.0), 0.0)
+    casualty_rate = max(vulnerability["casualty_rate"], 0.0)
+    economic_loss = exposed_asset_value * damage_ratio
+    possible_casualties = exposed_population * casualty_rate
 
-    if severity_multiplier >= 0.75:
+    if damage_ratio >= 0.45 or casualty_rate >= 0.0075:
         recommendation = "Evacuate exposed households, close unsafe roads, and pre-position rescue and medical teams."
-    elif severity_multiplier >= 0.50:
+    elif damage_ratio >= 0.25 or casualty_rate >= 0.003:
         recommendation = "Prepare evacuation centers, inspect slopes and drainage, and issue barangay-level warnings."
-    elif severity_multiplier >= 0.30:
+    elif damage_ratio >= 0.10 or casualty_rate >= 0.001:
         recommendation = "Increase monitoring, clear drainage, and advise residents to avoid steep or saturated slopes."
     else:
         recommendation = "Maintain routine monitoring and keep residents informed through local advisories."
 
     return {
         "estimated_area_sq_km": round(area_sq_km, 3),
-        "estimated_affected_people": round(affected_population),
+        "estimated_affected_people": round(exposed_population),
         "estimated_economic_loss_php": round(economic_loss),
         "estimated_possible_casualties": round(possible_casualties, 1),
+        "exposure_area_fraction": round(area_fraction, 6),
+        "exposed_asset_value_php": round(exposed_asset_value),
+        "damage_ratio": damage_ratio,
+        "casualty_rate": casualty_rate,
+        "vulnerability_level": vulnerability_level,
         "recommendation": recommendation,
-        "basis": "Planning estimate using mapped area, risk probability, population density, and asset exposure assumptions.",
+        "basis": "Planning estimate using generated barangay population, OSM asset exposure, vulnerability rates, and mapped risk area. Validate with LGU field reports before operational decisions.",
+        "data_sources": {
+            "population": str(BARANGAY_POPULATION_PATH),
+            "asset_values": str(ASSET_VALUES_PATH),
+            "vulnerability_rates": str(VULNERABILITY_RATES_PATH),
+            "summary": str(LOSS_EXPOSURE_SUMMARY_PATH),
+        },
     }
+
+
+def clip_geometry_to_southern_leyte(geometry):
+    province = load_southern_leyte_province_boundary()
+
+    if (
+        not geometry
+        or province is None
+        or shapely_shape is None
+        or mapping is None
+        or shapely_make_valid is None
+    ):
+        return geometry
+
+    try:
+        clipped = shapely_make_valid(
+            shapely_shape(geometry).intersection(
+                shapely_shape(province["geometry"])
+            )
+        )
+    except Exception:
+        return geometry
+
+    if clipped.is_empty:
+        return None
+
+    return mapping(clipped)
 
 
 @app.get("/risk-zones")
@@ -452,9 +1281,16 @@ def risk_zones():
     with engine.connect() as conn:
         rows = conn.execute(query).mappings().all()
 
-    return {
-        "type": "FeatureCollection",
-        "features": [
+    features = []
+
+    for row in rows:
+        geometry = row["geometry"] if isinstance(row["geometry"], dict) else json.loads(row["geometry"])
+        clipped_geometry = clip_geometry_to_southern_leyte(geometry)
+
+        if clipped_geometry is None:
+            continue
+
+        features.append(
             {
                 "type": "Feature",
                 "properties": {
@@ -468,12 +1304,64 @@ def risk_zones():
                         float(row["area_sq_km"] or 0),
                     ),
                 },
-                "geometry": row["geometry"]
-                if isinstance(row["geometry"], dict)
-                else json.loads(row["geometry"]),
+                "geometry": clipped_geometry,
             }
-            for row in rows
-        ],
+        )
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+    }
+
+
+@app.delete("/risk-zones")
+def clear_risk_zones():
+    with engine.begin() as conn:
+        deleted_count = conn.execute(text("DELETE FROM risk_zones;")).rowcount
+
+    return {
+        "message": "Risk layers cleared",
+        "deleted": deleted_count,
+    }
+
+
+def replace_risk_zones(predictions):
+    query = text(
+        """
+        INSERT INTO risk_zones (name, risk_level, probability, geom)
+        VALUES (
+            :name,
+            :risk_level,
+            :probability,
+            ST_GeomFromText(:wkt, 4326)
+        )
+        ON CONFLICT (name) DO UPDATE SET
+            risk_level = EXCLUDED.risk_level,
+            probability = EXCLUDED.probability,
+            geom = EXCLUDED.geom
+        RETURNING id, name, risk_level, probability;
+        """
+    )
+
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM risk_zones;"))
+        return [
+            conn.execute(query, prediction).mappings().one()
+            for prediction in predictions
+        ]
+
+
+@app.post("/restore-baseline-risk")
+def restore_baseline_risk():
+    baseline_result = run_baseline_hazard_predictions()
+    rows = replace_risk_zones(baseline_result["predictions"])
+
+    return {
+        "message": "Baseline 5-level hazard layer restored",
+        "model": baseline_result["model"],
+        "checkpoint": baseline_result["checkpoint"],
+        "inference_check": baseline_result["inference_check"],
+        "predictions": [dict(row) for row in rows],
     }
 
 
@@ -500,7 +1388,9 @@ def predict():
     cleanup_query = text(
         """
         DELETE FROM risk_zones
-        WHERE name IN (
+        WHERE name LIKE 'Rainfall Simulation % Risk'
+            OR name LIKE 'Live Rainfall Prediction % Risk'
+            OR name IN (
             'U-Net Sample Prediction',
             'U-Net High Risk',
             'U-Net Medium Risk',
@@ -515,7 +1405,12 @@ def predict():
             'NOAH Fine-Tuned U-Net 30% Risk',
             'NOAH Fine-Tuned U-Net 50% Risk',
             'NOAH Fine-Tuned U-Net 75% Risk',
-            'NOAH Fine-Tuned U-Net 100% Risk'
+            'NOAH Fine-Tuned U-Net 100% Risk',
+            'Attention U-Net 15% Risk',
+            'Attention U-Net 30% Risk',
+            'Attention U-Net 50% Risk',
+            'Attention U-Net 75% Risk',
+            'Attention U-Net 100% Risk'
         );
         """
     )

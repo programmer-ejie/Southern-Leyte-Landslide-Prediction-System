@@ -32,8 +32,6 @@ const numberFormatter = new Intl.NumberFormat('en-PH', {
 })
 
 const currencyFormatter = new Intl.NumberFormat('en-PH', {
-  style: 'currency',
-  currency: 'PHP',
   maximumFractionDigits: 0,
 })
 
@@ -42,7 +40,7 @@ function formatNumber(value) {
 }
 
 function formatPeso(value) {
-  return currencyFormatter.format(value ?? 0)
+  return `PHP ${currencyFormatter.format(value ?? 0)}`
 }
 
 function getSeverity(feature) {
@@ -262,7 +260,7 @@ function AlertsPage() {
           <li>
             <a className="nav-link" href="/admin/rainfall-scenarios">
               <i className="ti ti-cloud-rain"></i>
-              <span className="nav-text">Rainfall Scenarios</span>
+              <span className="nav-text">Rainfall Simulation</span>
             </a>
           </li>
           <li>

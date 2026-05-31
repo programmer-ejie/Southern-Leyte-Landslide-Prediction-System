@@ -104,7 +104,7 @@ function SettingsPage() {
           <li>
             <a className="nav-link" href="/admin/rainfall-scenarios">
               <i className="ti ti-cloud-rain"></i>
-              <span className="nav-text">Rainfall Scenarios</span>
+              <span className="nav-text">Rainfall Simulation</span>
             </a>
           </li>
           <li>

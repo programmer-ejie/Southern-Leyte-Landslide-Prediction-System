@@ -2,6 +2,7 @@ from functools import lru_cache
 import csv
 from pathlib import Path
 
+import h5py
 import torch
 
 from model.postprocessing import (
@@ -17,13 +18,15 @@ from model.preprocessing import (
     normalized_image_to_tensor,
     preprocess_image_array,
 )
-from model.unet_v3 import UNetV3, predict_probability_mask
+from model.attention_unet import AttentionUNet
+from model.unet_v3 import predict_probability_mask
 
 
 MODEL_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = MODEL_DIR.parent
-MODEL_CHECKPOINT = "unet_v3_southern_leyte_osm_manual_noah_5level.pth"
-MODEL_PATH = MODEL_DIR / MODEL_CHECKPOINT
+MODEL_NAME = "Attention U-Net"
+MODEL_CHECKPOINT = "attention_unet.pth"
+MODEL_PATH = MODEL_DIR / "new-model" / MODEL_CHECKPOINT
 SOUTHERN_LEYTE_TENSOR = (
     PROJECT_ROOT
     / "data"
@@ -35,11 +38,19 @@ SOUTHERN_LEYTE_TENSOR = (
 SOUTHERN_LEYTE_TILE_BOUNDS = (
     PROJECT_ROOT / "data" / "metadata" / "southern_leyte" / "tile_bounds.csv"
 )
+SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "southern_leyte"
+    / "masks"
+    / "southern_leyte_osm_manual_noah_5level_target.h5"
+)
 
 
 @lru_cache(maxsize=1)
 def load_model():
-    model = UNetV3(in_channels=14, out_channels=1)
+    model = AttentionUNet(in_channels=14, out_channels=1)
     state_dict = torch.load(MODEL_PATH, map_location="cpu")
     model.load_state_dict(state_dict)
     model.eval()
@@ -83,7 +94,7 @@ def _load_tile_bounds(tile_id="southern_leyte_demo_001"):
 
 
 def run_landslide_prediction(bounds=None):
-    """Run U-Net V3 on the processed Southern Leyte tensor when available."""
+    """Run the selected model on the processed Southern Leyte tensor when available."""
     model = load_model()
     input_image = SOUTHERN_LEYTE_TENSOR if SOUTHERN_LEYTE_TENSOR.exists() else DEFAULT_SAMPLE_IMAGE
     sample_input = _load_model_tensor(input_image)
@@ -107,7 +118,7 @@ def run_landslide_prediction(bounds=None):
         "name": "U-Net Sample Prediction",
         "risk_level": risk_level,
         "probability": probability,
-        "model": "U-Net V3",
+        "model": MODEL_NAME,
         "checkpoint": MODEL_CHECKPOINT,
         "inference_check": inference_check,
         "wkt": probability_mask_to_polygon_wkt(
@@ -128,7 +139,7 @@ def run_landslide_predictions(bounds=None):
     display_threshold = adaptive_mask_threshold(probability_array)
     inference_check = {
         "sample_image": str(input_image),
-        "risk_surface": "noah_finetuned_model_probability",
+        "risk_surface": "attention_unet_model_probability",
         "input_shape": list(sample_input.shape),
         "output_shape": list(probability_mask.shape),
         "mean_probability": float(probability_mask.mean().item()),
@@ -141,20 +152,59 @@ def run_landslide_predictions(bounds=None):
     predictions = probability_mask_to_risk_wkts(
         probability_array,
         bounds=bounds or _load_tile_bounds(),
-        name_prefix="NOAH Fine-Tuned U-Net",
+        name_prefix=MODEL_NAME,
+        min_pixels=1,
         band_specs=[
-            (1, "15%", "NOAH Fine-Tuned U-Net 15% Risk", 0.00, 0.15),
-            (2, "30%", "NOAH Fine-Tuned U-Net 30% Risk", 0.15, 0.30),
-            (3, "50%", "NOAH Fine-Tuned U-Net 50% Risk", 0.30, 0.50),
-            (4, "75%", "NOAH Fine-Tuned U-Net 75% Risk", 0.50, 0.75),
-            (5, "100%", "NOAH Fine-Tuned U-Net 100% Risk", 0.75, 1.00),
+            (1, "15%", "Attention U-Net 15% Risk", 0.00, 0.15),
+            (2, "30%", "Attention U-Net 30% Risk", 0.15, 0.30),
+            (3, "50%", "Attention U-Net 50% Risk", 0.30, 0.50),
+            (4, "75%", "Attention U-Net 75% Risk", 0.50, 0.75),
+            (5, "100%", "Attention U-Net 100% Risk", 0.75, 1.00),
         ],
     )
 
     return {
-        "model": "U-Net V3",
+        "model": MODEL_NAME,
         "checkpoint": MODEL_CHECKPOINT,
         "inference_check": inference_check,
+        "predictions": predictions,
+    }
+
+
+def run_baseline_hazard_predictions(bounds=None):
+    """Return the curated 5-level Southern Leyte baseline hazard layer."""
+    with h5py.File(SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK, "r") as f:
+        mask = f["mask"][:].astype("float32")
+
+    predictions = probability_mask_to_risk_wkts(
+        mask,
+        bounds=bounds or _load_tile_bounds(),
+        name_prefix="Baseline Hazard",
+        min_pixels=1,
+        simplify_tolerance=0,
+        band_specs=[
+            (1, "15%", "Baseline Hazard 15% Risk", 0.00, 0.151),
+            (2, "30%", "Baseline Hazard 30% Risk", 0.151, 0.49),
+            (3, "50%", "Baseline Hazard 50% Risk", 0.49, 0.51),
+            (4, "75%", "Baseline Hazard 75% Risk", 0.74, 0.76),
+            (5, "100%", "Baseline Hazard 100% Risk", 0.99, 1.01),
+        ],
+    )
+
+    return {
+        "model": "Curated 5-level baseline hazard",
+        "checkpoint": str(SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK),
+        "inference_check": {
+            "sample_image": str(SOUTHERN_LEYTE_BASELINE_5LEVEL_MASK),
+            "risk_surface": "osm_manual_noah_5level_target",
+            "input_shape": list(mask.shape),
+            "output_shape": list(mask.shape),
+            "mean_probability": float(mask.mean()),
+            "max_probability": float(mask.max()),
+            "min_probability": float(mask.min()),
+            "display_threshold": None,
+            "predicted_pixel_count": int((mask > 0).sum()),
+        },
         "predictions": predictions,
     }
 
@@ -175,14 +225,18 @@ def run_rainfall_simulation(
 
     total_rainfall_mm = max(float(rainfall_mm_per_hr), 0.0) * max(float(duration_hours), 0.0)
     saturation_factor = max(float(saturation_factor), 0.0)
-    rainfall_boost = min(total_rainfall_mm / 250.0, 1.0) * min(saturation_factor, 2.0)
+    rainfall_boost = min(total_rainfall_mm / 250.0, 1.0) * min(saturation_factor, 5.0) / 5.0
+    scenario_pressure = min((total_rainfall_mm / 500.0) * max(saturation_factor, 0.25), 1.0)
 
     baseline_rainfall = image[:, :, 3].copy()
-    image[:, :, 3] = (0.65 * baseline_rainfall + 0.35 * rainfall_boost).clip(0.0, 1.0)
+    image[:, :, 3] = (0.55 * baseline_rainfall + 0.45 * rainfall_boost).clip(0.0, 1.0)
 
     sample_input = normalized_image_to_tensor(image)
     probability_mask = predict_probability_mask(model, sample_input)
     probability_array = probability_mask.detach().cpu().numpy()
+    probability_array = (
+        probability_array + (1.0 - probability_array) * scenario_pressure * 0.82
+    ).clip(0.0, 1.0)
     display_threshold = adaptive_mask_threshold(probability_array)
     scenario_label = f"{total_rainfall_mm:.0f}mm/{duration_hours:.1f}h"
     name_prefix = name_prefix or f"Rainfall Simulation {scenario_label}"
@@ -191,6 +245,8 @@ def run_rainfall_simulation(
         probability_array,
         bounds=bounds or _load_tile_bounds(),
         name_prefix=name_prefix,
+        min_pixels=1,
+        simplify_tolerance=0,
         band_specs=[
             (1, "15%", f"{name_prefix} 15% Risk", 0.00, 0.15),
             (2, "30%", f"{name_prefix} 30% Risk", 0.15, 0.30),
@@ -205,6 +261,7 @@ def run_rainfall_simulation(
         "total_rainfall_mm": total_rainfall_mm,
         "saturation_factor": saturation_factor,
         "rainfall_boost": rainfall_boost,
+        "scenario_pressure": scenario_pressure,
         "baseline_rainfall_mean": float(baseline_rainfall.mean()),
         "simulated_rainfall_mean": float(image[:, :, 3].mean()),
     }
@@ -212,7 +269,7 @@ def run_rainfall_simulation(
         scenario.update(scenario_metadata)
 
     return {
-        "model": "U-Net V3",
+        "model": MODEL_NAME,
         "checkpoint": MODEL_CHECKPOINT,
         "scenario": scenario,
         "inference_check": {
