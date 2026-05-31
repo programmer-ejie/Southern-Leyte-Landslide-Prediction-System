@@ -3,6 +3,7 @@ import axios from 'axios'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
+import AdminProfileMenu from './AdminProfileMenu'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
 
@@ -268,6 +269,15 @@ function RainfallScenariosPage() {
               <span className="nav-text">Settings</span>
             </a>
           </li>
+          <li className="px-4 pt-4 pb-2 sidebar-account-label">
+            <small className="nav-text">Account</small>
+          </li>
+          <li className="px-3 pb-3 sidebar-logout-item">
+            <a className="nav-link sidebar-logout-link" href="/logout">
+              <i className="ti ti-logout"></i>
+              <span className="nav-text">Logout</span>
+            </a>
+          </li>
         </ul>
       </aside>
 
@@ -325,11 +335,7 @@ function RainfallScenariosPage() {
             </button>
           </li>
           <AdminAlertDropdown riskZones={riskZones} />
-          <li className="ms-3">
-            <span className="avatar avatar-sm avatar-primary rounded-circle overflow-hidden">
-              <span className="avatar-initials rounded-circle">EJ</span>
-            </span>
-          </li>
+          <AdminProfileMenu />
         </ul>
       </nav>
 
@@ -600,7 +606,7 @@ function RainfallScenariosPage() {
                       ))}
                       {simulationLogs.length === 0 && (
                         <tr>
-                          <td colSpan="4" className="text-secondary">
+                          <td colSpan="4" className="text-secondary text-center">
                             No simulations run in this session yet.
                           </td>
                         </tr>

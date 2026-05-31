@@ -12,6 +12,7 @@ import {
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
+import AdminProfileMenu from './AdminProfileMenu'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
 const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
@@ -311,6 +312,7 @@ function PredictionPage() {
   const [predictionStatus, setPredictionStatus] = useState('idle')
   const [livePredictionStatus, setLivePredictionStatus] = useState('idle')
   const [simulationStatus, setSimulationStatus] = useState('idle')
+  const [showPredictionLoader, setShowPredictionLoader] = useState(true)
   const [rainfallRate, setRainfallRate] = useState(20)
   const [durationHours, setDurationHours] = useState(6)
   const [saturationFactor, setSaturationFactor] = useState(1)
@@ -337,11 +339,45 @@ function PredictionPage() {
     riskZones?.features?.filter((feature) =>
       ['75%', '100%', 'High'].includes(feature.properties.risk_level),
     ).length ?? 0
+  const isPreparingPrediction =
+    riskStatus === 'loading' ||
+    predictionStatus === 'running' ||
+    livePredictionStatus === 'running' ||
+    simulationStatus === 'running'
+  const loaderTitle =
+    predictionStatus === 'running'
+      ? 'Preparing prediction'
+      : livePredictionStatus === 'running'
+        ? 'Preparing live prediction'
+        : simulationStatus === 'running'
+          ? 'Preparing rainfall simulation'
+          : 'Loading prediction map'
+  const loaderMessage =
+    predictionStatus === 'running'
+      ? 'Running the model and refreshing risk layers'
+      : livePredictionStatus === 'running'
+        ? 'Fetching live rainfall data before updating zones'
+        : simulationStatus === 'running'
+          ? 'Applying rainfall inputs to the risk map'
+          : 'Loading risk layers and municipality boundaries'
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
     localStorage.setItem('sl-lps-theme', themeMode)
   }, [themeMode])
+
+  useEffect(() => {
+    if (isPreparingPrediction) {
+      setShowPredictionLoader(true)
+      return undefined
+    }
+
+    const hideLoader = window.setTimeout(() => {
+      setShowPredictionLoader(false)
+    }, 850)
+
+    return () => window.clearTimeout(hideLoader)
+  }, [isPreparingPrediction])
 
   function loadRiskZones() {
     setRiskStatus('loading')
@@ -507,6 +543,15 @@ function PredictionPage() {
               <span className="nav-text">Settings</span>
             </a>
           </li>
+          <li className="px-4 pt-4 pb-2 sidebar-account-label">
+            <small className="nav-text">Account</small>
+          </li>
+          <li className="px-3 pb-3 sidebar-logout-item">
+            <a className="nav-link sidebar-logout-link" href="/logout">
+              <i className="ti ti-logout"></i>
+              <span className="nav-text">Logout</span>
+            </a>
+          </li>
         </ul>
       </aside>
 
@@ -567,11 +612,7 @@ function PredictionPage() {
             </button>
           </li>
           <AdminAlertDropdown riskZones={riskZones} />
-          <li className="ms-3">
-            <span className="avatar avatar-sm avatar-primary rounded-circle overflow-hidden">
-              <span className="avatar-initials rounded-circle">EJ</span>
-            </span>
-          </li>
+          <AdminProfileMenu />
         </ul>
       </nav>
 
@@ -904,6 +945,17 @@ function PredictionPage() {
                           />
                         ))}
                     </MapContainer>
+                    {showPredictionLoader && (
+                      <div className="prediction-loader" aria-live="polite">
+                        <div className="prediction-loader-panel">
+                          <span className="prediction-loader-ring"></span>
+                          <div>
+                            <strong>{loaderTitle}</strong>
+                            <span>{loaderMessage}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

@@ -4,6 +4,7 @@ import { GeoJSON, MapContainer, Pane, TileLayer } from 'react-leaflet'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
+import AdminProfileMenu from './AdminProfileMenu'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
 const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
@@ -141,6 +142,7 @@ function DashboardPage() {
   const [apiStatus, setApiStatus] = useState('checking')
   const [riskStatus, setRiskStatus] = useState('loading')
   const [riskZones, setRiskZones] = useState(null)
+  const [showMapLoader, setShowMapLoader] = useState(true)
   const [themeMode, setThemeMode] = useState(
     () => localStorage.getItem('sl-lps-theme') ?? 'light',
   )
@@ -173,11 +175,25 @@ function DashboardPage() {
           0,
         ) / mappedZones
       : 0
+  const isMapLoading = riskStatus === 'loading'
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
     localStorage.setItem('sl-lps-theme', themeMode)
   }, [themeMode])
+
+  useEffect(() => {
+    if (isMapLoading) {
+      setShowMapLoader(true)
+      return undefined
+    }
+
+    const hideLoader = window.setTimeout(() => {
+      setShowMapLoader(false)
+    }, 850)
+
+    return () => window.clearTimeout(hideLoader)
+  }, [isMapLoading])
 
   useEffect(() => {
     axios
@@ -269,6 +285,15 @@ function DashboardPage() {
               <span className="nav-text">Settings</span>
             </a>
           </li>
+          <li className="px-4 pt-4 pb-2 sidebar-account-label">
+            <small className="nav-text">Account</small>
+          </li>
+          <li className="px-3 pb-3 sidebar-logout-item">
+            <a className="nav-link sidebar-logout-link" href="/logout">
+              <i className="ti ti-logout"></i>
+              <span className="nav-text">Logout</span>
+            </a>
+          </li>
         </ul>
       </aside>
 
@@ -329,11 +354,7 @@ function DashboardPage() {
             </button>
           </li>
           <AdminAlertDropdown riskZones={riskZones} />
-          <li className="ms-3">
-            <span className="avatar avatar-sm avatar-primary rounded-circle overflow-hidden">
-              <span className="avatar-initials rounded-circle">EJ</span>
-            </span>
-          </li>
+          <AdminProfileMenu />
         </ul>
       </nav>
 
@@ -443,6 +464,17 @@ function DashboardPage() {
                         />
                       ))}
                     </MapContainer>
+                    {showMapLoader && (
+                      <div className="prediction-loader" aria-live="polite">
+                        <div className="prediction-loader-panel">
+                          <span className="prediction-loader-ring"></span>
+                          <div>
+                            <strong>Loading overview map</strong>
+                            <span>Preparing province risk layers</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

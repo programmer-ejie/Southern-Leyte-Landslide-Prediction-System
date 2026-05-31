@@ -3,8 +3,10 @@ import axios from 'axios'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
+import AdminProfileMenu from './AdminProfileMenu'
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
+const ALERTS_PER_PAGE = 6
 
 const riskLabelByLevel = {
   '15%': 'Low',
@@ -137,8 +139,14 @@ function AlertsPage() {
     () => localStorage.getItem('sl-lps-theme') ?? 'light',
   )
   const [selectedAlertId, setSelectedAlertId] = useState(null)
+  const [alertPage, setAlertPage] = useState(1)
 
   const alerts = useMemo(() => buildAlerts(riskZones), [riskZones])
+  const totalAlertPages = Math.max(1, Math.ceil(alerts.length / ALERTS_PER_PAGE))
+  const pagedAlerts = alerts.slice(
+    (alertPage - 1) * ALERTS_PER_PAGE,
+    alertPage * ALERTS_PER_PAGE,
+  )
   const selectedAlert =
     alerts.find((alert) => alert.id === selectedAlertId) ?? alerts[0] ?? null
   const severityDistribution = useMemo(
@@ -162,6 +170,16 @@ function AlertsPage() {
     document.documentElement.dataset.theme = themeMode
     localStorage.setItem('sl-lps-theme', themeMode)
   }, [themeMode])
+
+  useEffect(() => {
+    setAlertPage(1)
+  }, [alerts.length])
+
+  useEffect(() => {
+    if (alertPage > totalAlertPages) {
+      setAlertPage(totalAlertPages)
+    }
+  }, [alertPage, totalAlertPages])
 
   useEffect(() => {
     axios
@@ -253,6 +271,15 @@ function AlertsPage() {
               <span className="nav-text">Settings</span>
             </a>
           </li>
+          <li className="px-4 pt-4 pb-2 sidebar-account-label">
+            <small className="nav-text">Account</small>
+          </li>
+          <li className="px-3 pb-3 sidebar-logout-item">
+            <a className="nav-link sidebar-logout-link" href="/logout">
+              <i className="ti ti-logout"></i>
+              <span className="nav-text">Logout</span>
+            </a>
+          </li>
         </ul>
       </aside>
 
@@ -310,11 +337,7 @@ function AlertsPage() {
             </button>
           </li>
           <AdminAlertDropdown riskZones={riskZones} />
-          <li className="ms-3">
-            <span className="avatar avatar-sm avatar-primary rounded-circle overflow-hidden">
-              <span className="avatar-initials rounded-circle">EJ</span>
-            </span>
-          </li>
+          <AdminProfileMenu />
         </ul>
       </nav>
 
@@ -382,7 +405,7 @@ function AlertsPage() {
                 </div>
                 <div className="card-body p-4">
                   <div className="alert-feed">
-                    {alerts.map((alert) => (
+                    {pagedAlerts.map((alert) => (
                       <button
                         type="button"
                         className={`alert-feed-item ${
@@ -408,6 +431,33 @@ function AlertsPage() {
                       <p className="text-secondary mb-0">No alerts available.</p>
                     )}
                   </div>
+                  {alerts.length > ALERTS_PER_PAGE && (
+                    <div className="alert-pagination">
+                      <button
+                        type="button"
+                        className="btn btn-light btn-sm"
+                        disabled={alertPage === 1}
+                        onClick={() => setAlertPage((page) => Math.max(1, page - 1))}
+                      >
+                        <i className="ti ti-chevron-left"></i>
+                        Previous
+                      </button>
+                      <span>
+                        Page {alertPage} of {totalAlertPages}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-light btn-sm"
+                        disabled={alertPage === totalAlertPages}
+                        onClick={() =>
+                          setAlertPage((page) => Math.min(totalAlertPages, page + 1))
+                        }
+                      >
+                        Next
+                        <i className="ti ti-chevron-right"></i>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -525,15 +575,15 @@ function AlertsPage() {
                       <i className="ti ti-eye-check me-1"></i>
                       Mark Monitoring
                     </button>
-                    <button type="button" className="btn btn-outline-primary">
+                    <button type="button" className="btn btn-primary">
                       <i className="ti ti-circle-check me-1"></i>
                       Mark Resolved
                     </button>
-                    <button type="button" className="btn btn-outline-secondary">
+                    <button type="button" className="btn btn-primary">
                       <i className="ti ti-printer me-1"></i>
                       Print Advisory
                     </button>
-                    <button type="button" className="btn btn-dark">
+                    <button type="button" className="btn btn-primary">
                       <i className="ti ti-file-export me-1"></i>
                       Export Alert List
                     </button>
