@@ -53,6 +53,18 @@ def _load_baseline_hazard_mask():
         return f["mask"][:].astype("float32")
 
 
+def _baseline_hazard_to_probability(mask):
+    """Convert the curated 5-level hazard mask into a 0-1 probability surface."""
+    normalized = mask.astype("float32").copy()
+    normalized[mask <= 0] = 0.0
+    normalized[mask == 1] = 0.15
+    normalized[mask == 2] = 0.30
+    normalized[mask == 3] = 0.50
+    normalized[mask == 4] = 0.75
+    normalized[mask >= 5] = 1.00
+    return normalized
+
+
 @lru_cache(maxsize=1)
 def load_model():
     model = AttentionUNet(in_channels=14, out_channels=1)
@@ -226,7 +238,7 @@ def run_rainfall_simulation(
     model = load_model()
     input_image = SOUTHERN_LEYTE_TENSOR if SOUTHERN_LEYTE_TENSOR.exists() else DEFAULT_SAMPLE_IMAGE
     image = load_h5_image(input_image).astype("float32")
-    baseline_hazard = _load_baseline_hazard_mask()
+    baseline_hazard = _baseline_hazard_to_probability(_load_baseline_hazard_mask())
 
     total_rainfall_mm = max(float(rainfall_mm_per_hr), 0.0) * max(float(duration_hours), 0.0)
     saturation_factor = max(float(saturation_factor), 0.0)
@@ -253,7 +265,7 @@ def run_rainfall_simulation(
         bounds=bounds or _load_tile_bounds(),
         name_prefix=name_prefix,
         min_pixels=1,
-        simplify_tolerance=0,
+        simplify_tolerance=0.0015,
         band_specs=[
             (1, "15%", f"{name_prefix} 15% Risk", 0.00, 0.225),
             (2, "30%", f"{name_prefix} 30% Risk", 0.225, 0.40),

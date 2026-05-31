@@ -4,8 +4,8 @@ import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
 import AdminProfileMenu from './AdminProfileMenu'
+import { API_BASE_URL, applyTheme, getStoredTheme, loadSavedTheme, saveTheme } from './theme-settings'
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
 
 const MUNICIPALITIES = [
   'Anahawan',
@@ -146,7 +146,7 @@ function ReportsPage() {
   const [riskStatus, setRiskStatus] = useState('loading')
   const [riskZones, setRiskZones] = useState(null)
   const [themeMode, setThemeMode] = useState(
-    () => localStorage.getItem('sl-lps-theme') ?? 'light',
+    getStoredTheme,
   )
   const [selectedMunicipality, setSelectedMunicipality] = useState('Bontoc')
   const [selectedReportType, setSelectedReportType] = useState('Risk Summary')
@@ -167,9 +167,12 @@ function ReportsPage() {
   const latestProbability = highestRiskZone?.properties?.probability ?? 0
 
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode
-    localStorage.setItem('sl-lps-theme', themeMode)
+    applyTheme(themeMode)
   }, [themeMode])
+
+  useEffect(() => {
+    loadSavedTheme(setThemeMode)
+  }, [])
 
   useEffect(() => {
     axios
@@ -333,11 +336,11 @@ function ReportsPage() {
             <button
               type="button"
               className="btn-icon btn-sm btn-light btn rounded-circle"
-              onClick={() =>
-                setThemeMode((currentMode) =>
-                  currentMode === 'dark' ? 'light' : 'dark',
-                )
-              }
+              onClick={() => {
+                const nextThemeMode = themeMode === 'dark' ? 'light' : 'dark'
+                setThemeMode(nextThemeMode)
+                saveTheme(nextThemeMode)
+              }}
               aria-label="Toggle theme"
             >
               <i

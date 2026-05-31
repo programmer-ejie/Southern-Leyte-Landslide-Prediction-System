@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   GeoJSON,
@@ -6,13 +6,14 @@ import {
   MapContainer,
   Pane,
   TileLayer,
+  useMap,
 } from 'react-leaflet'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
 import AdminProfileMenu from './AdminProfileMenu'
+import { API_BASE_URL, applyTheme, getStoredTheme, loadSavedTheme, saveTheme } from './theme-settings'
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
 const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
 const SOUTHERN_LEYTE_BOUNDS = [
   [9.78, 124.68],
@@ -23,6 +24,11 @@ const BASELINE_RISK_IMAGE_BOUNDS = [
   [10.55, 125.35],
 ]
 
+const SIMULATION_STEPS = [0.2, 0.4, 0.6, 0.8, 1]
+const SIMULATION_PRECOMPUTE_ORDER = [4, 0, 1, 2, 3]
+const SIMULATION_RESET_STEP = -1
+const SIMULATION_STEP_INTERVAL_MS = 2000
+const SIMULATION_LOGS_PER_PAGE = 5
 const numberFormatter = new Intl.NumberFormat('en-PH', {
   maximumFractionDigits: 1,
 })
@@ -84,6 +90,22 @@ function getRiskStyle(feature) {
   return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
 }
 
+function SouthernLeyteMapFocus() {
+  const map = useMap()
+
+  useEffect(() => {
+    map.fitBounds(BASELINE_RISK_IMAGE_BOUNDS, { animate: false, padding: [18, 18] })
+    map.dragging.disable()
+    map.scrollWheelZoom.disable()
+    map.doubleClickZoom.disable()
+    map.boxZoom.disable()
+    map.keyboard.disable()
+    map.touchZoom.disable()
+  }, [map])
+
+  return null
+}
+
 function buildLossSummary(riskZones) {
   return (riskZones?.features ?? []).reduce(
     (summary, feature) => {
@@ -104,24 +126,6 @@ function buildLossSummary(riskZones) {
   )
 }
 
-function buildRiskDistribution(riskZones) {
-  const counts = {}
-
-  riskZones?.features?.forEach((feature) => {
-    const label =
-      riskLabelByLevel[feature.properties.risk_level] ?? feature.properties.risk_level
-    counts[label] = (counts[label] ?? 0) + 1
-  })
-
-  return Object.entries(counts)
-    .map(([label, count]) => ({
-      label,
-      count,
-      color: riskColorByLabel[label] ?? '#3673fc',
-    }))
-    .sort((a, b) => b.count - a.count)
-}
-
 function getDamageHotspot(riskZones) {
   return [...(riskZones?.features ?? [])].sort((featureA, featureB) => {
     const lossA = featureA.properties.loss_estimate?.estimated_economic_loss_php ?? 0
@@ -131,31 +135,87 @@ function getDamageHotspot(riskZones) {
   })[0]
 }
 
+function simulationLogFromApi(log) {
+  return {
+    id: String(log.id),
+    timestamp: log.timestamp ?? new Date(log.created_at).toLocaleString('en-PH'),
+    createdAt: log.created_at,
+    startedAt: log.started_at,
+    endedBy: log.ended_by,
+    rainfallRate: log.rainfall_rate,
+    durationHours: log.duration_hours,
+    saturationFactor: log.saturation_factor,
+    stepPercent: log.step_percent,
+    affectedPeople: log.affected_people,
+    possibleCasualties: log.possible_casualties,
+    economicLoss: log.economic_loss,
+    mappedArea: log.mapped_area,
+    hotspot: log.hotspot,
+    riskLevel: log.risk_level,
+  }
+}
+
 function RainfallScenariosPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [apiStatus, setApiStatus] = useState('checking')
   const [riskStatus, setRiskStatus] = useState('loading')
+  const [provinceBoundaryStatus, setProvinceBoundaryStatus] = useState('loading')
+  const [municipalityStatus, setMunicipalityStatus] = useState('loading')
+  const [barangayStatus, setBarangayStatus] = useState('loading')
+  const [simulationLogStatus, setSimulationLogStatus] = useState('loading')
   const [simulationStatus, setSimulationStatus] = useState('idle')
   const [themeMode, setThemeMode] = useState(
-    () => localStorage.getItem('sl-lps-theme') ?? 'light',
+    getStoredTheme,
   )
   const [riskZones, setRiskZones] = useState(null)
   const [rainfallRate, setRainfallRate] = useState(120)
   const [durationHours, setDurationHours] = useState(6)
   const [saturationFactor, setSaturationFactor] = useState(1)
+  const [isSimulationPlaying, setIsSimulationPlaying] = useState(false)
+  const [isSimulationPrecomputing, setIsSimulationPrecomputing] = useState(false)
+  const [simulationPrecomputeProgress, setSimulationPrecomputeProgress] = useState(0)
+  const [simulationPrecomputeLabel, setSimulationPrecomputeLabel] = useState(
+    'Preparing simulation',
+  )
+  const [simulationStep, setSimulationStep] = useState(SIMULATION_RESET_STEP)
+  const [simulationStartedAt, setSimulationStartedAt] = useState(null)
   const [simulationLogs, setSimulationLogs] = useState([])
+  const [simulationLogPage, setSimulationLogPage] = useState(1)
+  const [showSimulationMapLoader, setShowSimulationMapLoader] = useState(true)
+  const [simulationMapLoaderLabel, setSimulationMapLoaderLabel] = useState(
+    'Loading simulation map',
+  )
   const [provinceBoundary, setProvinceBoundary] = useState(null)
+  const [municipalityBoundaries, setMunicipalityBoundaries] = useState(null)
+  const [barangayBoundaries, setBarangayBoundaries] = useState(null)
+  const simulationRunRef = useRef(0)
+  const latestSimulationSnapshotRef = useRef(null)
+  const simulationStepSnapshotsRef = useRef([])
 
   const lossSummary = useMemo(() => buildLossSummary(riskZones), [riskZones])
-  const riskDistribution = useMemo(
-    () => buildRiskDistribution(riskZones),
-    [riskZones],
-  )
   const damageHotspot = useMemo(() => getDamageHotspot(riskZones), [riskZones])
-  const maxDistributionCount = Math.max(
+  const sortedSimulationLogs = useMemo(
+    () =>
+      [...simulationLogs].sort((logA, logB) => {
+        const createdA = Date.parse(logA.createdAt ?? logA.timestamp ?? '') || 0
+        const createdB = Date.parse(logB.createdAt ?? logB.timestamp ?? '') || 0
+
+        if (createdA !== createdB) {
+          return createdB - createdA
+        }
+
+        return Number(logB.id ?? 0) - Number(logA.id ?? 0)
+      }),
+    [simulationLogs],
+  )
+  const totalSimulationLogPages = Math.max(
     1,
-    ...riskDistribution.map((item) => item.count),
+    Math.ceil(sortedSimulationLogs.length / SIMULATION_LOGS_PER_PAGE),
+  )
+  const pagedSimulationLogs = sortedSimulationLogs.slice(
+    (simulationLogPage - 1) * SIMULATION_LOGS_PER_PAGE,
+    simulationLogPage * SIMULATION_LOGS_PER_PAGE,
   )
   const highRiskZones =
     riskZones?.features?.filter((feature) =>
@@ -169,16 +229,57 @@ function RainfallScenariosPage() {
       ?.filter((feature) => feature.properties.name?.startsWith('Baseline Hazard'))
       .map((feature) => feature.properties.id)
       .join('-') || 'baseline'
+  const riskLayerVersion =
+    riskZones?.features?.map((feature) => feature.properties.id).join('-') || 'empty'
+  const displayedBaselineOverlayVersion = hasBaselineRiskLayer
+    ? baselineOverlayVersion
+    : `simulation-underlay-${riskLayerVersion}`
+  const activeStepPercent =
+    simulationStep === SIMULATION_RESET_STEP
+      ? 0
+      : Math.round((SIMULATION_STEPS[simulationStep] ?? SIMULATION_STEPS[0]) * 100)
   const intensityIndex = Math.min(
     100,
     Math.round(
       (Number(rainfallRate) / 300) * 55 +
         (Number(durationHours) / 168) * 25 +
-        (Number(saturationFactor) / 5) * 20,
+      (Number(saturationFactor) / 5) * 20,
     ),
   )
+  const simulationLoaderChecklist = [
+    {
+      label: 'Risk layer',
+      detail: 'Current Southern Leyte hazard map',
+      status:
+        riskStatus === 'loading'
+          ? 'loading'
+          : riskStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Province boundary',
+      detail: 'Southern Leyte clipping mask',
+      status: provinceBoundaryStatus,
+    },
+    {
+      label: 'Municipalities',
+      detail: 'Municipality labels',
+      status: municipalityStatus,
+    },
+    {
+      label: 'Barangay boundaries',
+      detail: 'Barangay subdivision lines',
+      status: barangayStatus,
+    },
+    {
+      label: 'Simulation logs',
+      detail: 'Stopped rainfall scenario records',
+      status: simulationLogStatus,
+    },
+  ]
 
-  function loadRiskZones() {
+  function loadInitialRiskZones() {
     setRiskStatus('loading')
 
     return axios
@@ -195,10 +296,60 @@ function RainfallScenariosPage() {
   }
 
   function loadProvinceBoundary() {
+    setProvinceBoundaryStatus('loading')
+
     return axios
       .get(`${API_BASE_URL}/province-boundary`)
-      .then((response) => setProvinceBoundary(response.data))
-      .catch(() => setProvinceBoundary(null))
+      .then((response) => {
+        setProvinceBoundary(response.data)
+        setProvinceBoundaryStatus('ready')
+      })
+      .catch(() => {
+        setProvinceBoundary(null)
+        setProvinceBoundaryStatus('error')
+      })
+  }
+
+  function loadMunicipalityBoundaries() {
+    setMunicipalityStatus('loading')
+
+    return axios
+      .get(`${API_BASE_URL}/municipality-boundaries`)
+      .then((response) => {
+        setMunicipalityBoundaries(response.data)
+        setMunicipalityStatus('ready')
+      })
+      .catch(() => {
+        setMunicipalityBoundaries(null)
+        setMunicipalityStatus('error')
+      })
+  }
+
+  function loadBarangayBoundaries() {
+    setBarangayStatus('loading')
+
+    return axios
+      .get(`${API_BASE_URL}/barangay-boundaries`)
+      .then((response) => {
+        setBarangayBoundaries(response.data)
+        setBarangayStatus('ready')
+      })
+      .catch(() => {
+        setBarangayBoundaries(null)
+        setBarangayStatus('error')
+      })
+  }
+
+  function loadSimulationLogs() {
+    setSimulationLogStatus('loading')
+
+    return axios
+      .get(`${API_BASE_URL}/rainfall-simulation-logs`)
+      .then((response) => {
+        setSimulationLogs((response.data?.logs ?? []).map(simulationLogFromApi))
+        setSimulationLogStatus('ready')
+      })
+      .catch(() => setSimulationLogStatus('error'))
   }
 
   useEffect(() => {
@@ -209,53 +360,267 @@ function RainfallScenariosPage() {
   }, [])
 
   useEffect(() => {
-    loadRiskZones().then(() => loadProvinceBoundary())
+    setShowSimulationMapLoader(true)
+    setSimulationMapLoaderLabel('Loading simulation map')
+
+    loadInitialRiskZones().then(() =>
+      Promise.all([
+        loadProvinceBoundary(),
+        loadMunicipalityBoundaries(),
+        loadBarangayBoundaries(),
+        loadSimulationLogs(),
+      ]),
+    ).finally(() => setShowSimulationMapLoader(false))
   }, [])
 
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode
-    localStorage.setItem('sl-lps-theme', themeMode)
+    applyTheme(themeMode)
   }, [themeMode])
 
-  function runRainfallSimulation() {
-    setSimulationStatus('running')
+  useEffect(() => {
+    loadSavedTheme(setThemeMode)
+  }, [])
+
+  useEffect(() => {
+    setSimulationLogPage((page) => Math.min(page, totalSimulationLogPages))
+  }, [totalSimulationLogPages])
+
+  function saveSimulationLog(reason = 'Stopped') {
+    const snapshot = latestSimulationSnapshotRef.current
+    const loggedRiskZones = snapshot?.riskZones ?? riskZones
+    const summary = buildLossSummary(loggedRiskZones)
+    const hotspot = getDamageHotspot(loggedRiskZones)
+
+    const logEntry = {
+      id: `${Date.now()}`,
+      timestamp: new Date().toLocaleString('en-PH'),
+      createdAt: new Date().toISOString(),
+      startedAt: simulationStartedAt,
+      endedBy: reason,
+      rainfallRate: snapshot?.rainfallRate ?? Number(rainfallRate),
+      durationHours: snapshot?.durationHours ?? Number(durationHours),
+      saturationFactor: snapshot?.saturationFactor ?? Number(saturationFactor),
+      stepPercent: snapshot?.stepPercent ?? activeStepPercent,
+      affectedPeople: summary.people,
+      possibleCasualties: summary.casualties,
+      economicLoss: summary.economicLoss,
+      mappedArea: summary.area,
+      hotspot: hotspot?.properties?.name ?? 'No hotspot',
+      riskLevel:
+        riskLabelByLevel[hotspot?.properties?.risk_level] ??
+        hotspot?.properties?.risk_level ??
+        'Unavailable',
+    }
+
+    setSimulationLogs((logs) => [logEntry, ...logs])
 
     axios
-      .post(`${API_BASE_URL}/simulate-rainfall`, {
-        rainfall_mm_per_hr: Number(rainfallRate),
-        duration_hours: Number(durationHours),
-        saturation_factor: Math.min(Math.max(Number(saturationFactor) || 0, 0), 5),
+      .post(`${API_BASE_URL}/rainfall-simulation-logs`, {
+        timestamp: logEntry.timestamp,
+        started_at: logEntry.startedAt,
+        ended_by: logEntry.endedBy,
+        rainfall_rate: logEntry.rainfallRate,
+        duration_hours: logEntry.durationHours,
+        saturation_factor: logEntry.saturationFactor,
+        step_percent: logEntry.stepPercent,
+        affected_people: logEntry.affectedPeople,
+        possible_casualties: logEntry.possibleCasualties,
+        economic_loss: logEntry.economicLoss,
+        mapped_area: logEntry.mappedArea,
+        hotspot: logEntry.hotspot,
+        risk_level: logEntry.riskLevel,
       })
-      .then(() => loadRiskZones())
-      .then((updatedRiskZones) => {
-        loadProvinceBoundary()
-        return updatedRiskZones
-      })
-      .then((updatedRiskZones) => {
-        const summary = buildLossSummary(updatedRiskZones)
-        const hotspot = getDamageHotspot(updatedRiskZones)
-
-        setSimulationLogs((logs) => [
-          {
-            id: `${Date.now()}`,
-            timestamp: new Date().toLocaleString('en-PH'),
-            rainfallRate: Number(rainfallRate),
-            durationHours: Number(durationHours),
-            saturationFactor: Number(saturationFactor),
-            affectedPeople: summary.people,
-            economicLoss: summary.economicLoss,
-            hotspot: hotspot?.properties?.name ?? 'No hotspot',
-            riskLevel:
-              riskLabelByLevel[hotspot?.properties?.risk_level] ??
-              hotspot?.properties?.risk_level ??
-              'Unavailable',
-          },
-          ...logs,
-        ])
-        setSimulationStatus('saved')
-      })
-      .catch(() => setSimulationStatus('failed'))
+      .then(() => loadSimulationLogs())
+      .catch(() => undefined)
   }
+
+  function buildSimulationStepSnapshot(stepIndex, riskZoneData) {
+    const stepMultiplier = SIMULATION_STEPS[stepIndex] ?? SIMULATION_STEPS[0]
+
+    return {
+      riskZones: riskZoneData,
+      rainfallRate: Number(rainfallRate) * stepMultiplier,
+      durationHours: Number(durationHours) * stepMultiplier,
+      saturationFactor: Math.min(
+        Math.max((Number(saturationFactor) || 0) * stepMultiplier, 0),
+        5,
+      ),
+      stepPercent: Math.round(stepMultiplier * 100),
+    }
+  }
+
+  function getSimulationStepPayload(stepIndex) {
+    const stepMultiplier = SIMULATION_STEPS[stepIndex] ?? SIMULATION_STEPS[0]
+
+    return {
+      rainfall_mm_per_hr: Number(rainfallRate) * stepMultiplier,
+      duration_hours: Number(durationHours) * stepMultiplier,
+      saturation_factor: Math.min(
+        Math.max((Number(saturationFactor) || 0) * stepMultiplier, 0),
+        5,
+      ),
+    }
+  }
+
+  function applyCachedSimulationStep(stepIndex, runId = simulationRunRef.current) {
+    const snapshot = simulationStepSnapshotsRef.current[stepIndex]
+
+    if (!snapshot || runId !== simulationRunRef.current) {
+      return
+    }
+
+    setRiskZones(snapshot.riskZones)
+    setRiskStatus('preview')
+    setSimulationStep(stepIndex)
+    latestSimulationSnapshotRef.current = snapshot
+  }
+
+  async function precomputeSimulationSteps(runId = simulationRunRef.current) {
+    const snapshots = []
+
+    setIsSimulationPrecomputing(true)
+    setSimulationStatus('precomputing')
+    setSimulationPrecomputeProgress(0)
+    setSimulationPrecomputeLabel('Preparing simulation maps')
+
+    try {
+      for (let orderIndex = 0; orderIndex < SIMULATION_PRECOMPUTE_ORDER.length; orderIndex += 1) {
+        const stepIndex = SIMULATION_PRECOMPUTE_ORDER[orderIndex]
+        const stepPercent = Math.round(SIMULATION_STEPS[stepIndex] * 100)
+        setSimulationPrecomputeLabel(`Precomputing ${stepPercent}% map`)
+
+        const response = await axios.post(
+          `${API_BASE_URL}/simulate-rainfall-preview`,
+          getSimulationStepPayload(stepIndex),
+        )
+
+        if (runId !== simulationRunRef.current) {
+          return null
+        }
+
+        const snapshot = buildSimulationStepSnapshot(
+          stepIndex,
+          response.data?.risk_zones ?? null,
+        )
+        snapshots[stepIndex] = snapshot
+        setSimulationPrecomputeProgress(
+          Math.round(((orderIndex + 1) / SIMULATION_PRECOMPUTE_ORDER.length) * 100),
+        )
+      }
+
+      simulationStepSnapshotsRef.current = snapshots
+      return snapshots
+    } catch {
+      if (runId === simulationRunRef.current) {
+        setSimulationStatus('failed')
+      }
+
+      return null
+    } finally {
+      if (runId === simulationRunRef.current) {
+        setIsSimulationPrecomputing(false)
+      }
+    }
+  }
+
+  function toggleRainfallSimulation() {
+    if (isSimulationPlaying) {
+      simulationRunRef.current += 1
+      setIsSimulationPlaying(false)
+      setSimulationStatus('stopped')
+      saveSimulationLog('Stopped')
+      return
+    }
+
+    simulationRunRef.current += 1
+    const runId = simulationRunRef.current
+    setSimulationStartedAt(new Date().toLocaleString('en-PH'))
+    setSimulationStep(SIMULATION_RESET_STEP)
+    latestSimulationSnapshotRef.current = null
+    simulationStepSnapshotsRef.current = []
+    precomputeSimulationSteps(runId).then((snapshots) => {
+      if (!snapshots || runId !== simulationRunRef.current) {
+        return
+      }
+
+      setIsSimulationPlaying(true)
+      applyCachedSimulationStep(0, runId)
+      setSimulationStatus('playing')
+    })
+  }
+
+  function resetSimulationMapLayer(
+    runId = simulationRunRef.current,
+    nextStatus = 'idle',
+    showLoader = false,
+  ) {
+    setSimulationStep(SIMULATION_RESET_STEP)
+    setSimulationStatus('resetting')
+
+    if (showLoader) {
+      setShowSimulationMapLoader(true)
+      setSimulationMapLoaderLabel('Resetting map')
+    }
+
+    return loadInitialRiskZones()
+      .then(() => loadProvinceBoundary())
+      .then(() => {
+        if (runId === simulationRunRef.current) {
+          setSimulationStatus(nextStatus)
+        }
+      })
+      .catch(() => {
+        if (runId === simulationRunRef.current) {
+          setSimulationStatus('failed')
+        }
+      })
+      .finally(() => {
+        if (showLoader && runId === simulationRunRef.current) {
+          setShowSimulationMapLoader(false)
+        }
+      })
+  }
+
+  function resetSimulationMap() {
+    simulationRunRef.current += 1
+    setIsSimulationPlaying(false)
+    setIsSimulationPrecomputing(false)
+    setSimulationPrecomputeProgress(0)
+    setSimulationStartedAt(null)
+    latestSimulationSnapshotRef.current = null
+    simulationStepSnapshotsRef.current = []
+    resetSimulationMapLayer(simulationRunRef.current, 'idle', true)
+  }
+
+  useEffect(() => {
+    if (!isSimulationPlaying) {
+      return undefined
+    }
+
+    if (simulationStatus !== 'playing') {
+      return undefined
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (simulationStep === SIMULATION_STEPS.length - 1) {
+        resetSimulationMapLayer(simulationRunRef.current, 'playing')
+        return
+      }
+
+      const nextStep =
+        simulationStep === SIMULATION_RESET_STEP ? 0 : simulationStep + 1
+      applyCachedSimulationStep(nextStep, simulationRunRef.current)
+    }, SIMULATION_STEP_INTERVAL_MS)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [
+    isSimulationPlaying,
+    rainfallRate,
+    durationHours,
+    saturationFactor,
+    simulationStatus,
+    simulationStep,
+  ])
 
   return (
     <>
@@ -380,11 +745,11 @@ function RainfallScenariosPage() {
             <button
               type="button"
               className="btn-icon btn-sm btn-light btn rounded-circle"
-              onClick={() =>
-                setThemeMode((currentMode) =>
-                  currentMode === 'dark' ? 'light' : 'dark',
-                )
-              }
+              onClick={() => {
+                const nextThemeMode = themeMode === 'dark' ? 'light' : 'dark'
+                setThemeMode(nextThemeMode)
+                saveTheme(nextThemeMode)
+              }}
               aria-label="Toggle theme"
             >
               <i
@@ -417,7 +782,7 @@ function RainfallScenariosPage() {
             </div>
           </div>
 
-          <div className="row g-3 mb-3">
+          <div className="row g-3 mb-3 scenario-metrics-row">
             <div className="col-xl-3 col-md-6 col-12">
               <ScenarioMetric
                 icon="ti-cloud-rain"
@@ -455,18 +820,18 @@ function RainfallScenariosPage() {
             </div>
           </div>
 
-          <div className="row g-3 mb-3">
-            <div className="col-12">
+          <div className="row g-3 mb-3 simulation-workspace-row">
+            <div className="col-12 col-lg-8">
               <div className="card prediction-map-card">
                 <div className="card-header map-card-header bg-transparent px-4 py-3">
-                  <div>
+                  <div className="map-header-title">
                     <h4 className="mb-0 h5">Rainfall Simulation Map</h4>
                     <p className="text-secondary mb-0">
-                      Simulated landslide risk layer generated from rainfall inputs.
+                      Locked Southern Leyte view with animated rainfall scenario output.
                     </p>
                   </div>
                   <span className={`predict-status predict-status--${riskStatus}`}>
-                    Risk layer: {riskStatus}
+                    Step {activeStepPercent}% / {simulationStatus}
                   </span>
                 </div>
                 <div className="card-body p-0">
@@ -475,11 +840,18 @@ function RainfallScenariosPage() {
                       center={SOUTHERN_LEYTE_POSITION}
                       zoom={10}
                       className="map-view"
-                      scrollWheelZoom
+                      zoomControl={false}
+                      scrollWheelZoom={false}
                       maxBounds={SOUTHERN_LEYTE_BOUNDS}
                       maxBoundsViscosity={1}
                       minZoom={9}
+                      dragging={false}
+                      touchZoom={false}
+                      doubleClickZoom={false}
+                      boxZoom={false}
+                      keyboard={false}
                     >
+                      <SouthernLeyteMapFocus />
                       <TileLayer
                         attribution="&copy; OpenStreetMap contributors &copy; CARTO"
                         url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png"
@@ -493,23 +865,23 @@ function RainfallScenariosPage() {
                       <Pane name="risk-50" style={{ zIndex: 520 }} />
                       <Pane name="risk-75" style={{ zIndex: 530 }} />
                       <Pane name="risk-100" style={{ zIndex: 540 }} />
-                      <Pane name="province-boundary" style={{ zIndex: 560 }} />
+                      <Pane name="simulation-barangays" style={{ zIndex: 565 }} />
+                      <Pane name="province-boundary" style={{ zIndex: 575 }} />
+                      <Pane name="simulation-municipalities" style={{ zIndex: 585 }} />
 
-                      {hasBaselineRiskLayer && (
-                        <ImageOverlay
-                          bounds={BASELINE_RISK_IMAGE_BOUNDS}
-                          pane="baseline-risk-image"
-                          url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${baselineOverlayVersion}`}
-                          opacity={1}
-                        />
-                      )}
+                      <ImageOverlay
+                        bounds={BASELINE_RISK_IMAGE_BOUNDS}
+                        pane="baseline-risk-image"
+                        url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`}
+                        opacity={1}
+                      />
 
                       {riskZones &&
                         riskZones.features.map((feature) =>
                           hasBaselineRiskLayer &&
                           feature.properties.name?.startsWith('Baseline Hazard') ? null : (
                             <GeoJSON
-                              key={`${feature.properties.id}-${feature.properties.risk_level}`}
+                              key={`simulation-step-${activeStepPercent}-${feature.properties.id}-${feature.properties.risk_level}`}
                               data={feature}
                               pane={
                                 riskPaneByLevel[feature.properties.risk_level] ??
@@ -519,6 +891,22 @@ function RainfallScenariosPage() {
                             />
                           ),
                         )}
+
+                      {barangayBoundaries?.features?.length > 0 && (
+                        <GeoJSON
+                          key={`simulation-barangays-${barangayBoundaries.features.length}`}
+                          data={barangayBoundaries}
+                          pane="simulation-barangays"
+                          interactive={false}
+                          style={{
+                            className: 'simulation-barangay-boundary',
+                            color: '#374151',
+                            fillOpacity: 0,
+                            opacity: 0.95,
+                            weight: 1.2,
+                          }}
+                        />
+                      )}
 
                       {provinceBoundary?.geometry && (
                         <GeoJSON
@@ -535,18 +923,77 @@ function RainfallScenariosPage() {
                           }}
                         />
                       )}
+
+                      {municipalityBoundaries?.features?.length > 0 && (
+                        <GeoJSON
+                          key="simulation-municipality-labels"
+                          data={municipalityBoundaries}
+                          pane="simulation-municipalities"
+                          interactive={false}
+                          style={{
+                            color: 'transparent',
+                            fillOpacity: 0,
+                            opacity: 0,
+                            weight: 0,
+                          }}
+                          onEachFeature={(municipalityFeature, layer) => {
+                            layer.bindTooltip(municipalityFeature.properties.name, {
+                              className: 'simulation-municipality-label',
+                              direction: 'center',
+                              permanent: true,
+                            })
+                          }}
+                        />
+                      )}
                     </MapContainer>
+                    {showSimulationMapLoader && (
+                      <div className="simulation-map-loader">
+                        <span className="prediction-loader-ring"></span>
+                        <div className="prediction-loader-content">
+                          <strong>{simulationMapLoaderLabel}</strong>
+                          <small>
+                            Preparing the Southern Leyte risk layer and boundaries.
+                          </small>
+                          <ul className="prediction-loader-checklist">
+                            {simulationLoaderChecklist.map((item) => (
+                              <li
+                                key={item.label}
+                                className={`prediction-loader-check prediction-loader-check--${item.status}`}
+                              >
+                                <i
+                                  className={`ti ${
+                                    item.status === 'ready'
+                                      ? 'ti-check'
+                                      : item.status === 'error'
+                                        ? 'ti-alert-triangle'
+                                        : 'ti-loader-2'
+                                  }`}
+                                ></i>
+                                <span>
+                                  <b>{item.label}</b>
+                                  <small>{item.detail}</small>
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <div className="row g-3 mb-3">
-            <div className="col-12 col-xl-4">
-              <div className="card h-100">
+            <div className="col-12 col-lg-4">
+              <div className="card h-100 simulation-builder-card">
                 <div className="card-header bg-white px-4 py-3">
-                  <h4 className="mb-0 h5">Scenario Builder</h4>
+                  <div>
+                    <h4 className="mb-0 h5">Scenario Builder</h4>
+                    <p className="text-secondary mb-0 small">
+                      Press run to play the scenario loop. Press stop to save the
+                      event into logs.
+                    </p>
+                  </div>
                 </div>
                 <div className="card-body p-4">
                   <label className="form-label" htmlFor="scenario-rainfall">
@@ -591,21 +1038,74 @@ function RainfallScenariosPage() {
 
                   <button
                     type="button"
-                    className="btn btn-primary w-100"
-                    onClick={runRainfallSimulation}
-                    disabled={simulationStatus === 'running'}
+                    className={`btn w-100 ${
+                      isSimulationPlaying ? 'btn-danger' : 'btn-primary'
+                    }`}
+                    onClick={toggleRainfallSimulation}
+                    disabled={isSimulationPrecomputing}
                   >
-                    <i className="ti ti-player-play me-1"></i>
-                    {simulationStatus === 'running' ? 'Simulating...' : 'Run Simulation'}
+                    <i
+                      className={`ti ${
+                        isSimulationPrecomputing
+                          ? 'ti-loader-2'
+                          : isSimulationPlaying
+                            ? 'ti-player-stop'
+                            : 'ti-player-play'
+                      } me-1`}
+                    ></i>
+                    {isSimulationPrecomputing
+                      ? 'Preparing Simulation...'
+                      : isSimulationPlaying
+                        ? 'Stop Simulation'
+                        : 'Run Simulation'}
                   </button>
+                  {isSimulationPrecomputing && (
+                    <div className="simulation-precompute-panel">
+                      <div className="simulation-precompute-heading">
+                        <span>{simulationPrecomputeLabel}</span>
+                        <strong>{simulationPrecomputeProgress}%</strong>
+                      </div>
+                      <div className="simulation-precompute-track">
+                        <div
+                          className="simulation-precompute-fill"
+                          style={{ width: `${simulationPrecomputeProgress}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                  )}
                   <p className={`predict-status predict-status--${simulationStatus}`}>
                     Simulation: {simulationStatus}
                   </p>
+                  <div className="simulation-step-strip">
+                    {SIMULATION_STEPS.map((step, index) => (
+                      <span
+                        key={step}
+                        className={
+                          index === simulationStep && isSimulationPlaying
+                            ? 'active'
+                            : ''
+                        }
+                      >
+                        {Math.round(step * 100)}%
+                      </span>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-danger w-100 mt-4"
+                    onClick={resetSimulationMap}
+                    disabled={simulationStatus === 'resetting'}
+                  >
+                    <i className="ti ti-rotate-2 me-1"></i>
+                    {simulationStatus === 'resetting' ? 'Resetting Map...' : 'Reset Map'}
+                  </button>
                 </div>
               </div>
             </div>
+          </div>
 
-            <div className="col-12 col-xl-4">
+          <div className="row g-3 mb-3">
+            <div className="col-12 col-xl-6">
               <div className="card h-100">
                 <div className="card-header bg-white px-4 py-3">
                   <h4 className="mb-0 h5">Scenario Intensity</h4>
@@ -635,7 +1135,7 @@ function RainfallScenariosPage() {
               </div>
             </div>
 
-            <div className="col-12 col-xl-4">
+            <div className="col-12 col-xl-6">
               <div className="card h-100">
                 <div className="card-header bg-white px-4 py-3">
                   <h4 className="mb-0 h5">Most Damage Expected</h4>
@@ -683,43 +1183,7 @@ function RainfallScenariosPage() {
           </div>
 
           <div className="row g-3 mb-3">
-            <div className="col-12 col-xl-5">
-              <div className="card h-100">
-                <div className="card-header bg-white px-4 py-3">
-                  <h4 className="mb-0 h5">Risk Output</h4>
-                </div>
-                <div className="card-body p-4">
-                  <div className="risk-bars">
-                    {riskDistribution.map((item) => (
-                      <div className="risk-bar-row" key={item.label}>
-                        <span>
-                          <i
-                            className="risk-dot"
-                            style={{ backgroundColor: item.color }}
-                          ></i>
-                          {item.label}
-                        </span>
-                        <div className="risk-bar-track">
-                          <div
-                            className="risk-bar-fill"
-                            style={{
-                              width: `${(item.count / Math.max(1, riskZones?.features?.length ?? 0)) * 100}%`,
-                              background: item.color,
-                            }}
-                          ></div>
-                        </div>
-                        <strong>{item.count}</strong>
-                      </div>
-                    ))}
-                    {riskDistribution.length === 0 && (
-                      <p className="text-secondary mb-0">No risk output available.</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="col-12 col-xl-7">
+            <div className="col-12">
               <div className="card h-100">
                 <div className="card-header bg-white px-4 py-3">
                   <h4 className="mb-0 h5">Simulation Logs</h4>
@@ -731,11 +1195,12 @@ function RainfallScenariosPage() {
                         <th>Time</th>
                         <th>Scenario</th>
                         <th>Damage hotspot</th>
-                        <th>Economic loss</th>
+                        <th className="simulation-log-number-cell">Possible casualties</th>
+                        <th className="simulation-log-number-cell">Economic loss</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {simulationLogs.map((log) => (
+                      {pagedSimulationLogs.map((log) => (
                         <tr key={log.id}>
                           <td>{log.timestamp}</td>
                           <td>
@@ -745,21 +1210,55 @@ function RainfallScenariosPage() {
                           <td>
                             {log.hotspot}
                             <span className="d-block text-secondary small">
-                              {log.riskLevel}
+                              {log.riskLevel} / stopped at {log.stepPercent}%
                             </span>
                           </td>
-                          <td>{formatPeso(log.economicLoss)}</td>
+                          <td className="simulation-log-number-cell">
+                            {formatNumber(log.possibleCasualties)}
+                          </td>
+                          <td className="simulation-log-number-cell">
+                            {formatPeso(log.economicLoss)}
+                          </td>
                         </tr>
                       ))}
-                      {simulationLogs.length === 0 && (
+                      {sortedSimulationLogs.length === 0 && (
                         <tr>
-                          <td colSpan="4" className="text-secondary text-center">
+                          <td colSpan="5" className="text-secondary text-center">
                             No simulations run in this session yet.
                           </td>
                         </tr>
                       )}
                     </tbody>
                   </table>
+                </div>
+                <div className="alert-pagination px-4 py-3">
+                  <button
+                    type="button"
+                    className="btn btn-light btn-sm"
+                    disabled={simulationLogPage === 1}
+                    onClick={() =>
+                      setSimulationLogPage((page) => Math.max(1, page - 1))
+                    }
+                  >
+                    <i className="ti ti-chevron-left"></i>
+                    Previous
+                  </button>
+                  <span>
+                    Page {simulationLogPage} of {totalSimulationLogPages}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-light btn-sm"
+                    disabled={simulationLogPage === totalSimulationLogPages}
+                    onClick={() =>
+                      setSimulationLogPage((page) =>
+                        Math.min(totalSimulationLogPages, page + 1),
+                      )
+                    }
+                  >
+                    Next
+                    <i className="ti ti-chevron-right"></i>
+                  </button>
                 </div>
               </div>
             </div>
@@ -792,16 +1291,16 @@ function RainfallScenariosPage() {
 function ScenarioMetric({ icon, label, value, note, tone = 'primary' }) {
   return (
     <div
-      className={`card p-4 border rounded-2 h-100 bg-${tone} bg-opacity-10 border-${tone} border-opacity-25`}
+      className={`card scenario-metric-card border rounded-2 h-100 bg-${tone} bg-opacity-10 border-${tone} border-opacity-25`}
     >
-      <div className="d-flex gap-3">
-        <div className={`icon-shape icon-md bg-${tone} text-white rounded-2`}>
+      <div className="scenario-metric-inner">
+        <div className={`icon-shape scenario-metric-icon bg-${tone} text-white rounded-2`}>
           <i className={`ti ${icon} fs-4`}></i>
         </div>
-        <div className="min-w-0">
-          <h2 className="mb-3 fs-6">{label}</h2>
-          <h3 className="fw-bold mb-0 dashboard-card-value">{value}</h3>
-          <p className={`mb-0 small text-${tone} text-capitalize`}>{note}</p>
+        <div className="scenario-metric-content">
+          <h2>{label}</h2>
+          <strong className="scenario-metric-value">{value}</strong>
+          <p className={`text-${tone} text-capitalize`}>{note}</p>
         </div>
       </div>
     </div>

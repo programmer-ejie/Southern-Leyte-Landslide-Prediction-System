@@ -1798,6 +1798,17 @@ body {
   box-shadow: 0 0 0 0.2rem rgba(54, 115, 252, 0.14);
 }
 
+.settings-field {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-field span {
+  color: #637083;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .prediction-map-frame {
   position: relative;
   height: min(720px, calc(100vh - 282px));
@@ -1816,8 +1827,260 @@ body {
 }
 
 .prediction-map-frame--simulation {
-  height: min(640px, calc(100vh - 320px));
-  min-height: 480px;
+  height: min(720px, calc(100vh - 258px));
+  min-height: 560px;
+}
+
+.simulation-workspace-row {
+  align-items: stretch;
+}
+
+.simulation-workspace-row > [class*='col-'] {
+  display: flex;
+}
+
+.simulation-workspace-row .card {
+  width: 100%;
+}
+
+.simulation-builder-card .card-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.scenario-metrics-row > [class*='col-'] {
+  display: flex;
+}
+
+.scenario-metric-card {
+  overflow: hidden;
+  padding: 22px;
+  position: relative;
+  width: 100%;
+}
+
+.scenario-metric-card::after {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.16), transparent 62%);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.scenario-metric-inner {
+  align-items: flex-start;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 58px minmax(0, 1fr);
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.scenario-metric-icon {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 58px;
+  height: 58px;
+  justify-content: center;
+  width: 58px;
+}
+
+.scenario-metric-content {
+  min-width: 0;
+}
+
+.scenario-metric-content h2 {
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.2;
+  margin: 0 0 14px;
+}
+
+.scenario-metric-value {
+  color: inherit;
+  display: block;
+  font-size: clamp(24px, 2vw, 34px);
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1.05;
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+.scenario-metric-content p {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.2;
+  margin: 8px 0 0;
+}
+
+@media (max-width: 1399.98px) and (min-width: 1200px) {
+  .scenario-metric-card {
+    padding: 18px;
+  }
+
+  .scenario-metric-inner {
+    gap: 12px;
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .scenario-metric-icon {
+    height: 48px;
+    width: 48px;
+  }
+
+  .scenario-metric-value {
+    font-size: 26px;
+  }
+}
+
+@media (max-width: 575.98px) {
+  .scenario-metric-inner {
+    align-items: center;
+  }
+
+  .scenario-metric-value {
+    font-size: 27px;
+  }
+}
+
+.simulation-step-strip {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(5, 1fr);
+  margin-top: 16px;
+}
+
+.simulation-step-strip span {
+  align-items: center;
+  background: rgba(54, 115, 252, 0.08);
+  border: 1px solid rgba(54, 115, 252, 0.14);
+  border-radius: 8px;
+  color: #637083;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  justify-content: center;
+  min-height: 30px;
+}
+
+.simulation-step-strip span.active {
+  background: #3673fc;
+  border-color: #3673fc;
+  color: #ffffff;
+  box-shadow: 0 10px 22px rgba(54, 115, 252, 0.28);
+}
+
+.simulation-precompute-panel {
+  background: rgba(54, 115, 252, 0.08);
+  border: 1px solid rgba(54, 115, 252, 0.16);
+  border-radius: 8px;
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.simulation-precompute-heading {
+  align-items: center;
+  color: #9fb2d1;
+  display: flex;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.simulation-precompute-heading strong {
+  color: #f8fbff;
+}
+
+.simulation-precompute-track {
+  background: rgba(144, 189, 255, 0.14);
+  border-radius: 999px;
+  height: 8px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.simulation-precompute-fill {
+  background: #3673fc;
+  border-radius: inherit;
+  height: 100%;
+  transition: width 0.2s ease;
+}
+
+.simulation-builder-card .ti-loader-2 {
+  animation: prediction-loader-spin 0.95s linear infinite;
+}
+
+.simulation-map-loader,
+.simulation-step-loader {
+  align-items: flex-start;
+  background: rgba(7, 20, 38, 0.9);
+  border: 1px solid rgba(144, 189, 255, 0.22);
+  border-radius: 10px;
+  bottom: 18px;
+  box-shadow: 0 18px 40px rgba(2, 10, 24, 0.28);
+  color: #f8fbff;
+  display: flex;
+  gap: 12px;
+  left: 18px;
+  max-width: min(430px, calc(100% - 36px));
+  padding: 12px 14px;
+  position: absolute;
+  z-index: 930;
+}
+
+.simulation-map-loader .prediction-loader-ring,
+.simulation-step-loader .prediction-loader-ring {
+  flex: 0 0 38px;
+}
+
+.simulation-map-loader strong,
+.simulation-map-loader small,
+.simulation-step-loader strong,
+.simulation-step-loader small {
+  display: block;
+  line-height: 1.25;
+}
+
+.simulation-map-loader strong,
+.simulation-step-loader strong {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.simulation-map-loader small,
+.simulation-step-loader small {
+  color: #b8c7e0;
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.simulation-map-loader .prediction-loader-check {
+  background: rgba(54, 115, 252, 0.08);
+  border-color: rgba(144, 189, 255, 0.14);
+}
+
+.simulation-map-loader .prediction-loader-check b {
+  color: #f8fbff;
+}
+
+.simulation-map-loader .prediction-loader-check small {
+  color: #9fb2d1;
+}
+
+[data-theme='dark'] .simulation-step-strip span {
+  background: rgba(54, 115, 252, 0.1);
+  border-color: rgba(144, 189, 255, 0.15);
+  color: #9fb2d1;
+}
+
+[data-theme='dark'] .simulation-step-strip span.active {
+  background: #3673fc;
+  border-color: #3673fc;
+  color: #ffffff;
 }
 
 .prediction-info-panel {
@@ -2325,6 +2588,39 @@ body {
 
 .barangay-label::before {
   display: none;
+}
+
+.simulation-barangay-boundary {
+  filter:
+    drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.95))
+    drop-shadow(0 0 1px rgba(17, 24, 39, 0.35));
+  pointer-events: none;
+}
+
+.simulation-municipality-label {
+  border: 0;
+  color: #1f2937;
+  background: transparent;
+  box-shadow: none;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+  padding: 0;
+  text-transform: uppercase;
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.88),
+    1px 0 0 rgba(255, 255, 255, 0.88),
+    0 -1px 0 rgba(255, 255, 255, 0.88),
+    -1px 0 0 rgba(255, 255, 255, 0.88);
+}
+
+.simulation-municipality-label::before {
+  display: none;
+}
+
+.simulation-log-number-cell {
+  text-align: center;
 }
 
 .municipality-label {

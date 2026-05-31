@@ -5,8 +5,8 @@ import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
 import AdminProfileMenu from './AdminProfileMenu'
+import { API_BASE_URL, applyTheme, getStoredTheme, loadSavedTheme, saveTheme } from './theme-settings'
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
 const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
 const SOUTHERN_LEYTE_BOUNDS = [
   [9.78, 124.68],
@@ -142,7 +142,7 @@ function DashboardPage() {
   const [riskZones, setRiskZones] = useState(null)
   const [showMapLoader, setShowMapLoader] = useState(true)
   const [themeMode, setThemeMode] = useState(
-    () => localStorage.getItem('sl-lps-theme') ?? 'light',
+    getStoredTheme,
   )
 
   const lossSummary = useMemo(() => buildLossSummary(riskZones), [riskZones])
@@ -176,9 +176,12 @@ function DashboardPage() {
   const isMapLoading = riskStatus === 'loading'
 
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode
-    localStorage.setItem('sl-lps-theme', themeMode)
+    applyTheme(themeMode)
   }, [themeMode])
+
+  useEffect(() => {
+    loadSavedTheme(setThemeMode)
+  }, [])
 
   useEffect(() => {
     if (isMapLoading) {
@@ -337,11 +340,11 @@ function DashboardPage() {
             <button
               type="button"
               className="btn-icon btn-sm btn-light btn rounded-circle"
-              onClick={() =>
-                setThemeMode((currentMode) =>
-                  currentMode === 'dark' ? 'light' : 'dark',
-                )
-              }
+              onClick={() => {
+                const nextThemeMode = themeMode === 'dark' ? 'light' : 'dark'
+                setThemeMode(nextThemeMode)
+                saveTheme(nextThemeMode)
+              }}
               aria-label="Toggle theme"
             >
               <i

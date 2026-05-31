@@ -4,8 +4,7 @@ import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
 import AdminProfileMenu from './AdminProfileMenu'
-
-const API_BASE_URL = 'http://127.0.0.1:8000'
+import { API_BASE_URL, applyTheme, getStoredTheme, saveTheme } from './theme-settings'
 
 function SettingsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -14,10 +13,121 @@ function SettingsPage() {
   const [dbStatus, setDbStatus] = useState('checking')
   const [modelStatus, setModelStatus] = useState('checking')
   const [themeMode, setThemeMode] = useState(
-    () => localStorage.getItem('sl-lps-theme') ?? 'light',
+    getStoredTheme,
   )
   const [exportFormat, setExportFormat] = useState('GeoJSON')
   const [dataScope, setDataScope] = useState('Risk Zones')
+  const [defaultMunicipality, setDefaultMunicipality] = useState('Bontoc')
+  const [defaultRainfall, setDefaultRainfall] = useState(120)
+  const [defaultDuration, setDefaultDuration] = useState(6)
+  const [mapInteraction, setMapInteraction] = useState('Locked by default')
+  const [settingsStatus, setSettingsStatus] = useState('loading')
+  const [exportStatus, setExportStatus] = useState('idle')
+  const [metadataStatus, setMetadataStatus] = useState('loading')
+  const [controlStatus, setControlStatus] = useState({})
+  const [metadata, setMetadata] = useState(null)
+
+  function applySettings(settings) {
+    if (!settings) {
+      return
+    }
+
+    setThemeMode(settings.theme_mode ?? 'light')
+    setExportFormat(settings.export_format ?? 'GeoJSON')
+    setDataScope(settings.data_scope ?? 'Risk Zones')
+    setDefaultMunicipality(settings.default_municipality ?? 'Bontoc')
+    setDefaultRainfall(settings.default_rainfall ?? 120)
+    setDefaultDuration(settings.default_duration ?? 6)
+    setMapInteraction(settings.map_interaction ?? 'Locked by default')
+  }
+
+  function loadSettings() {
+    setSettingsStatus('loading')
+
+    return axios
+      .get(`${API_BASE_URL}/system-settings`)
+      .then((response) => {
+        applySettings(response.data?.settings)
+        setSettingsStatus('saved')
+      })
+      .catch(() => setSettingsStatus('failed'))
+  }
+
+  function refreshMetadata() {
+    setMetadataStatus('loading')
+
+    return axios
+      .get(`${API_BASE_URL}/system-settings/metadata`)
+      .then((response) => {
+        setMetadata(response.data)
+        setMetadataStatus('loaded')
+      })
+      .catch(() => setMetadataStatus('failed'))
+  }
+
+  function saveSettings(overrides = {}) {
+    const payload = {
+      theme_mode: themeMode,
+      export_format: exportFormat,
+      data_scope: dataScope,
+      default_municipality: defaultMunicipality,
+      default_rainfall: Number(defaultRainfall),
+      default_duration: Number(defaultDuration),
+      map_interaction: mapInteraction,
+      ...overrides,
+    }
+
+    setSettingsStatus('saving')
+
+    return axios
+      .put(`${API_BASE_URL}/system-settings`, payload)
+      .then((response) => {
+        applySettings(response.data?.settings)
+        setSettingsStatus('saved')
+      })
+      .then(() => refreshMetadata())
+      .catch(() => setSettingsStatus('failed'))
+  }
+
+  function runControl(action) {
+    setControlStatus((status) => ({ ...status, [action]: 'running' }))
+
+    return axios
+      .post(`${API_BASE_URL}/system-controls/${action}`)
+      .then(() => {
+        setControlStatus((status) => ({ ...status, [action]: 'done' }))
+        return refreshMetadata()
+      })
+      .catch(() =>
+        setControlStatus((status) => ({ ...status, [action]: 'failed' })),
+      )
+  }
+
+  function exportData() {
+    setExportStatus('exporting')
+    saveSettings({ data_scope: dataScope, export_format: exportFormat })
+
+    return axios
+      .get(`${API_BASE_URL}/system-export`, {
+        params: { scope: dataScope, format: exportFormat },
+        responseType: 'blob',
+      })
+      .then((response) => {
+        const disposition = response.headers['content-disposition'] ?? ''
+        const filenameMatch = disposition.match(/filename="([^"]+)"/)
+        const filename =
+          filenameMatch?.[1] ??
+          `${dataScope.toLowerCase().replaceAll(' ', '-')}.${exportFormat.toLowerCase()}`
+        const url = window.URL.createObjectURL(response.data)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = filename
+        link.click()
+        window.URL.revokeObjectURL(url)
+        setExportStatus('done')
+      })
+      .catch(() => setExportStatus('failed'))
+  }
 
   useEffect(() => {
     axios
@@ -34,12 +144,20 @@ function SettingsPage() {
       .get(`${API_BASE_URL}/model-health`)
       .then(() => setModelStatus('loaded'))
       .catch(() => setModelStatus('offline'))
+
+    loadSettings()
+    refreshMetadata()
   }, [])
 
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode
-    localStorage.setItem('sl-lps-theme', themeMode)
+    applyTheme(themeMode)
   }, [themeMode])
+
+  function updateThemeMode(nextThemeMode) {
+    setThemeMode(nextThemeMode)
+    saveTheme(nextThemeMode)
+    saveSettings({ theme_mode: nextThemeMode })
+  }
 
   return (
     <>
@@ -165,9 +283,7 @@ function SettingsPage() {
               type="button"
               className="btn-icon btn-sm btn-light btn rounded-circle"
               onClick={() =>
-                setThemeMode((currentMode) =>
-                  currentMode === 'dark' ? 'light' : 'dark',
-                )
+                updateThemeMode(themeMode === 'dark' ? 'light' : 'dark')
               }
               aria-label="Toggle theme"
             >
@@ -227,7 +343,7 @@ function SettingsPage() {
                     <button
                       type="button"
                       className={themeMode === 'light' ? 'active' : ''}
-                      onClick={() => setThemeMode('light')}
+                      onClick={() => updateThemeMode('light')}
                     >
                       <i className="ti ti-sun"></i>
                       Light
@@ -235,7 +351,7 @@ function SettingsPage() {
                     <button
                       type="button"
                       className={themeMode === 'dark' ? 'active' : ''}
-                      onClick={() => setThemeMode('dark')}
+                      onClick={() => updateThemeMode('dark')}
                     >
                       <i className="ti ti-moon"></i>
                       Dark
@@ -244,10 +360,13 @@ function SettingsPage() {
                   <div className="settings-note mt-4">
                     <strong>Interface mode</strong>
                     <span>
-                      The toggle is prepared for system-wide theme switching. Current
-                      dashboard styling remains optimized for light mode.
+                      Theme preference is saved in the database and restored when the
+                      settings page loads.
                     </span>
                   </div>
+                  <p className={`predict-status predict-status--${settingsStatus}`}>
+                    Settings: {settingsStatus}
+                  </p>
                 </div>
               </div>
             </div>
@@ -293,18 +412,46 @@ function SettingsPage() {
                     </div>
                   </div>
                   <div className="settings-action-row mt-4">
-                    <button type="button" className="btn btn-primary">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={exportData}
+                      disabled={exportStatus === 'exporting'}
+                    >
                       <i className="ti ti-database-export me-1"></i>
-                      Export {dataScope}
+                      {exportStatus === 'exporting' ? 'Exporting...' : `Export ${dataScope}`}
                     </button>
-                    <button type="button" className="btn btn-outline-primary">
+                    <button
+                      type="button"
+                      className="btn btn-outline-primary"
+                      onClick={refreshMetadata}
+                      disabled={metadataStatus === 'loading'}
+                    >
                       <i className="ti ti-refresh me-1"></i>
-                      Refresh Metadata
+                      {metadataStatus === 'loading' ? 'Refreshing...' : 'Refresh Metadata'}
                     </button>
                   </div>
                   <p className="predict-status">
-                    Selected export: {dataScope} as {exportFormat}
+                    Selected export: {dataScope} as {exportFormat} / {exportStatus}
                   </p>
+                  <div className="settings-default-grid mt-4">
+                    <DefaultItem
+                      label="Risk zones"
+                      value={metadata?.risk_zones ?? '...'}
+                    />
+                    <DefaultItem
+                      label="Simulation logs"
+                      value={metadata?.simulation_logs ?? '...'}
+                    />
+                    <DefaultItem
+                      label="Barangays"
+                      value={metadata?.barangay_boundaries ?? '...'}
+                    />
+                    <DefaultItem
+                      label="Metadata"
+                      value={metadataStatus}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -319,19 +466,28 @@ function SettingsPage() {
                 <div className="card-body p-4">
                   <div className="settings-control-list">
                     <ControlItem
+                      action="reload-risk-zones"
                       icon="ti-map-search"
                       title="Reload Risk Zones"
                       text="Request the latest mapped prediction records from the API."
+                      status={controlStatus['reload-risk-zones']}
+                      onRun={() => runControl('reload-risk-zones')}
                     />
                     <ControlItem
+                      action="check-model-health"
                       icon="ti-brain"
                       title="Check Model Health"
                       text="Validate model availability before live prediction runs."
+                      status={controlStatus['check-model-health']}
+                      onRun={() => runControl('check-model-health')}
                     />
                     <ControlItem
+                      action="backup-configuration"
                       icon="ti-shield-check"
                       title="Backup Configuration"
                       text="Prepare current system configuration for administrative backup."
+                      status={controlStatus['backup-configuration']}
+                      onRun={() => runControl('backup-configuration')}
                     />
                   </div>
                 </div>
@@ -345,10 +501,58 @@ function SettingsPage() {
                 </div>
                 <div className="card-body p-4">
                   <div className="settings-default-grid">
-                    <DefaultItem label="Default municipality" value="Bontoc" />
-                    <DefaultItem label="Default rainfall" value="120 mm/hr" />
-                    <DefaultItem label="Default duration" value="6 hours" />
-                    <DefaultItem label="Map interaction" value="Locked by default" />
+                    <label className="settings-field">
+                      <span>Default municipality</span>
+                      <input
+                        className="form-control"
+                        value={defaultMunicipality}
+                        onChange={(event) => setDefaultMunicipality(event.target.value)}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>Default rainfall</span>
+                      <input
+                        className="form-control"
+                        type="number"
+                        min="0"
+                        max="300"
+                        value={defaultRainfall}
+                        onChange={(event) => setDefaultRainfall(event.target.value)}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>Default duration</span>
+                      <input
+                        className="form-control"
+                        type="number"
+                        min="0"
+                        max="168"
+                        value={defaultDuration}
+                        onChange={(event) => setDefaultDuration(event.target.value)}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>Map interaction</span>
+                      <select
+                        className="form-select"
+                        value={mapInteraction}
+                        onChange={(event) => setMapInteraction(event.target.value)}
+                      >
+                        <option>Locked by default</option>
+                        <option>Interactive by default</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="settings-action-row mt-4">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => saveSettings()}
+                      disabled={settingsStatus === 'saving'}
+                    >
+                      <i className="ti ti-device-floppy me-1"></i>
+                      {settingsStatus === 'saving' ? 'Saving...' : 'Save Defaults'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -396,7 +600,7 @@ function StatusCard({ icon, label, value }) {
   )
 }
 
-function ControlItem({ icon, title, text }) {
+function ControlItem({ icon, title, text, status = 'idle', onRun }) {
   return (
     <div className="control-item">
       <div className="icon-shape icon-sm bg-primary bg-opacity-10 text-primary rounded-2">
@@ -406,8 +610,13 @@ function ControlItem({ icon, title, text }) {
         <strong>{title}</strong>
         <span>{text}</span>
       </div>
-      <button type="button" className="btn btn-sm btn-light">
-        Run
+      <button
+        type="button"
+        className="btn btn-sm btn-light"
+        onClick={onRun}
+        disabled={status === 'running'}
+      >
+        {status === 'running' ? 'Running...' : status === 'done' ? 'Done' : 'Run'}
       </button>
     </div>
   )

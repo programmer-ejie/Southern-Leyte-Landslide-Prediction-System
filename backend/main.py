@@ -130,9 +130,35 @@ class RainfallSimulationRequest(BaseModel):
     saturation_factor: float = Field(default=1.0, ge=0, le=5)
 
 
+class RainfallSimulationLogRequest(BaseModel):
+    timestamp: str | None = None
+    started_at: str | None = None
+    ended_by: str | None = None
+    rainfall_rate: float = Field(ge=0)
+    duration_hours: float = Field(ge=0)
+    saturation_factor: float = Field(ge=0)
+    step_percent: float = Field(ge=0, le=100)
+    affected_people: float = Field(default=0, ge=0)
+    possible_casualties: float = Field(default=0, ge=0)
+    economic_loss: float = Field(default=0, ge=0)
+    mapped_area: float = Field(default=0, ge=0)
+    hotspot: str | None = None
+    risk_level: str | None = None
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class SystemSettingsRequest(BaseModel):
+    theme_mode: str | None = None
+    export_format: str | None = None
+    data_scope: str | None = None
+    default_municipality: str | None = None
+    default_rainfall: float | None = Field(default=None, ge=0, le=300)
+    default_duration: float | None = Field(default=None, ge=0, le=168)
+    map_interaction: str | None = None
 
 
 ADMIN_USER = {
@@ -142,6 +168,16 @@ ADMIN_USER = {
     "middle_name": None,
     "last_name": "tagud",
     "role": "admin",
+}
+
+DEFAULT_SYSTEM_SETTINGS = {
+    "theme_mode": "light",
+    "export_format": "GeoJSON",
+    "data_scope": "Risk Zones",
+    "default_municipality": "Bontoc",
+    "default_rainfall": 120,
+    "default_duration": 6,
+    "map_interaction": "Locked by default",
 }
 
 
@@ -259,6 +295,9 @@ def prepare_auth_users():
             },
         )
 
+    ensure_rainfall_simulation_logs_table()
+    ensure_system_settings_table()
+
 
 @app.get("/")
 def root():
@@ -280,6 +319,242 @@ def db_health():
         "database": "connected",
         "postgis": postgis_version,
     }
+
+
+def ensure_system_settings_table():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key TEXT PRIMARY KEY,
+                    value JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+        )
+
+        for key, value in DEFAULT_SYSTEM_SETTINGS.items():
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO system_settings (key, value)
+                    VALUES (:key, CAST(:value AS JSONB))
+                    ON CONFLICT (key) DO NOTHING;
+                    """
+                ),
+                {"key": key, "value": json.dumps(value)},
+            )
+
+
+def read_system_settings():
+    ensure_system_settings_table()
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT key, value FROM system_settings;")
+        ).mappings().all()
+
+    settings = dict(DEFAULT_SYSTEM_SETTINGS)
+    for row in rows:
+        settings[row["key"]] = row["value"]
+
+    return settings
+
+
+@app.get("/system-settings")
+def system_settings():
+    return {"settings": read_system_settings()}
+
+
+@app.put("/system-settings")
+def update_system_settings(request: SystemSettingsRequest):
+    ensure_system_settings_table()
+    updates = request.dict(exclude_none=True)
+
+    with engine.begin() as conn:
+        for key, value in updates.items():
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES (:key, CAST(:value AS JSONB), NOW())
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = NOW();
+                    """
+                ),
+                {"key": key, "value": json.dumps(value)},
+            )
+
+    return {"settings": read_system_settings()}
+
+
+def build_settings_metadata():
+    ensure_system_settings_table()
+    ensure_rainfall_simulation_logs_table()
+
+    with engine.connect() as conn:
+        risk_zone_count = conn.execute(text("SELECT COUNT(*) FROM risk_zones;")).scalar()
+        simulation_log_count = conn.execute(
+            text("SELECT COUNT(*) FROM rainfall_simulation_logs;")
+        ).scalar()
+        settings_updated_at = conn.execute(
+            text("SELECT MAX(updated_at) FROM system_settings;")
+        ).scalar()
+
+    barangay_count = sum(
+        len(features) for features in load_southern_leyte_barangay_boundaries().values()
+    )
+    municipality_count = len(load_southern_leyte_municipality_boundaries())
+
+    return {
+        "risk_zones": risk_zone_count,
+        "simulation_logs": simulation_log_count,
+        "municipality_boundaries": municipality_count,
+        "barangay_boundaries": barangay_count,
+        "settings_updated_at": settings_updated_at.isoformat()
+        if settings_updated_at
+        else None,
+    }
+
+
+@app.get("/system-settings/metadata")
+def system_settings_metadata():
+    return build_settings_metadata()
+
+
+@app.post("/system-controls/{action}")
+def run_system_control(action: str):
+    normalized_action = action.strip().lower()
+
+    if normalized_action == "reload-risk-zones":
+        return {
+            "message": "Risk zones reloaded from database",
+            "metadata": build_settings_metadata(),
+        }
+
+    if normalized_action == "check-model-health":
+        return {
+            "message": "Model health check complete",
+            "model": model_health(),
+        }
+
+    if normalized_action == "backup-configuration":
+        settings = read_system_settings()
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES ('last_configuration_backup', CAST(:value AS JSONB), NOW())
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = NOW();
+                    """
+                ),
+                {"value": json.dumps(settings)},
+            )
+
+        return {
+            "message": "Configuration backup saved in database",
+            "settings": settings,
+        }
+
+    raise HTTPException(status_code=404, detail="Unknown system control.")
+
+
+def csv_response(filename, rows):
+    output = io.StringIO()
+    fieldnames = sorted({key for row in rows for key in row.keys()}) if rows else ["message"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    if rows:
+        writer.writerows(rows)
+    else:
+        writer.writerow({"message": "No rows available"})
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'},
+    )
+
+
+def json_export_response(filename, payload):
+    return Response(
+        content=json.dumps(payload, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.json"'},
+    )
+
+
+@app.get("/system-export")
+def system_export(scope: str = "Risk Zones", format: str = "GeoJSON"):
+    normalized_scope = scope.strip().lower()
+    normalized_format = format.strip().lower()
+
+    if normalized_scope == "risk zones":
+        payload = risk_zones()
+        filename = "risk-zones"
+        csv_rows = [
+            {
+                "id": feature["properties"].get("id"),
+                "name": feature["properties"].get("name"),
+                "risk_level": feature["properties"].get("risk_level"),
+                "probability": feature["properties"].get("probability"),
+            }
+            for feature in payload.get("features", [])
+        ]
+    elif normalized_scope == "municipality boundaries":
+        payload = municipality_boundaries()
+        filename = "municipality-boundaries"
+        csv_rows = [
+            feature.get("properties", {}) for feature in payload.get("features", [])
+        ]
+    elif normalized_scope == "barangay boundaries":
+        payload = barangay_boundaries()
+        filename = "barangay-boundaries"
+        csv_rows = [
+            feature.get("properties", {}) for feature in payload.get("features", [])
+        ]
+    elif normalized_scope == "simulation logs":
+        payload = rainfall_simulation_logs(limit=100)
+        filename = "simulation-logs"
+        csv_rows = payload.get("logs", [])
+    else:
+        raise HTTPException(status_code=404, detail="Unknown export scope.")
+
+    if normalized_format == "csv":
+        return csv_response(filename, csv_rows)
+
+    if normalized_format == "sql dump":
+        return Response(
+            content=(
+                f"-- {scope} export\n"
+                f"-- Generated by Southern Leyte Landslide Prediction System\n"
+                f"-- Rows: {len(csv_rows)}\n"
+                f"/* JSON payload:\n{json.dumps(payload, default=str)}\n*/\n"
+            ),
+            media_type="application/sql",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.sql"'},
+        )
+
+    if normalized_format == "pdf summary":
+        return Response(
+            content=(
+                f"{scope} Summary\n"
+                f"Generated by Southern Leyte Landslide Prediction System\n"
+                f"Records: {len(csv_rows)}\n"
+            ),
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{filename}-summary.txt"'},
+        )
+
+    return json_export_response(filename, payload)
 
 
 @lru_cache(maxsize=1)
@@ -898,6 +1173,20 @@ def municipality_barangays(municipality_name: str):
     }
 
 
+@app.get("/barangay-boundaries")
+def barangay_boundaries():
+    barangays_by_municipality = load_southern_leyte_barangay_boundaries()
+
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            feature
+            for features in barangays_by_municipality.values()
+            for feature in features
+        ],
+    }
+
+
 @app.get("/municipality-boundary/{municipality_name}/barangay/{barangay_name}/risk-breakdown")
 def barangay_risk_breakdown(municipality_name: str, barangay_name: str):
     barangays_by_municipality = load_southern_leyte_barangay_boundaries()
@@ -1351,6 +1640,50 @@ def replace_risk_zones(predictions):
         ]
 
 
+def predictions_to_feature_collection(predictions):
+    query = text(
+        """
+        SELECT
+            ST_Area(ST_GeomFromText(:wkt, 4326)::geography) / 1000000.0 AS area_sq_km,
+            ST_AsGeoJSON(ST_GeomFromText(:wkt, 4326), 6)::json AS geometry;
+        """
+    )
+
+    features = []
+
+    with engine.connect() as conn:
+        for index, prediction in enumerate(predictions, start=1):
+            row = conn.execute(query, prediction).mappings().one()
+            geometry = row["geometry"] if isinstance(row["geometry"], dict) else json.loads(row["geometry"])
+            clipped_geometry = clip_geometry_to_southern_leyte(geometry)
+
+            if clipped_geometry is None:
+                continue
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "id": f"simulation-preview-{index}",
+                        "name": prediction["name"],
+                        "risk_level": prediction["risk_level"],
+                        "probability": prediction["probability"],
+                        "loss_estimate": estimate_loss(
+                            prediction["probability"],
+                            prediction["risk_level"],
+                            float(row["area_sq_km"] or 0),
+                        ),
+                    },
+                    "geometry": clipped_geometry,
+                }
+            )
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+    }
+
+
 @app.post("/restore-baseline-risk")
 def restore_baseline_risk():
     baseline_result = run_baseline_hazard_predictions()
@@ -1411,3 +1744,115 @@ def simulate_rainfall(request: RainfallSimulationRequest):
         "inference_check": simulation_result["inference_check"],
         "predictions": [dict(row) for row in rows],
     }
+
+
+@app.post("/simulate-rainfall-preview")
+def simulate_rainfall_preview(request: RainfallSimulationRequest):
+    simulation_result = run_rainfall_simulation(
+        rainfall_mm_per_hr=request.rainfall_mm_per_hr,
+        duration_hours=request.duration_hours,
+        saturation_factor=request.saturation_factor,
+    )
+
+    return {
+        "message": "Rainfall simulation preview generated",
+        "model": simulation_result["model"],
+        "checkpoint": simulation_result["checkpoint"],
+        "scenario": simulation_result["scenario"],
+        "inference_check": simulation_result["inference_check"],
+        "risk_zones": predictions_to_feature_collection(
+            simulation_result["predictions"]
+        ),
+    }
+
+
+def ensure_rainfall_simulation_logs_table():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS rainfall_simulation_logs (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TEXT,
+                    started_at TEXT,
+                    ended_by TEXT,
+                    rainfall_rate DOUBLE PRECISION NOT NULL,
+                    duration_hours DOUBLE PRECISION NOT NULL,
+                    saturation_factor DOUBLE PRECISION NOT NULL,
+                    step_percent DOUBLE PRECISION NOT NULL,
+                    affected_people DOUBLE PRECISION DEFAULT 0,
+                    possible_casualties DOUBLE PRECISION DEFAULT 0,
+                    economic_loss DOUBLE PRECISION DEFAULT 0,
+                    mapped_area DOUBLE PRECISION DEFAULT 0,
+                    hotspot TEXT,
+                    risk_level TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                """
+            )
+        )
+
+
+@app.post("/rainfall-simulation-logs")
+def create_rainfall_simulation_log(request: RainfallSimulationLogRequest):
+    ensure_rainfall_simulation_logs_table()
+
+    query = text(
+        """
+        INSERT INTO rainfall_simulation_logs (
+            timestamp,
+            started_at,
+            ended_by,
+            rainfall_rate,
+            duration_hours,
+            saturation_factor,
+            step_percent,
+            affected_people,
+            possible_casualties,
+            economic_loss,
+            mapped_area,
+            hotspot,
+            risk_level
+        )
+        VALUES (
+            :timestamp,
+            :started_at,
+            :ended_by,
+            :rainfall_rate,
+            :duration_hours,
+            :saturation_factor,
+            :step_percent,
+            :affected_people,
+            :possible_casualties,
+            :economic_loss,
+            :mapped_area,
+            :hotspot,
+            :risk_level
+        )
+        RETURNING *;
+        """
+    )
+
+    with engine.begin() as conn:
+        row = conn.execute(query, request.dict()).mappings().one()
+
+    return dict(row)
+
+
+@app.get("/rainfall-simulation-logs")
+def rainfall_simulation_logs(limit: int = 25):
+    ensure_rainfall_simulation_logs_table()
+
+    query = text(
+        """
+        SELECT *
+        FROM rainfall_simulation_logs
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit;
+        """
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(query, {"limit": max(min(limit, 100), 1)}).mappings().all()
+
+    return {"logs": [dict(row) for row in rows]}
