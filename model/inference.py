@@ -197,7 +197,7 @@ def run_baseline_hazard_predictions(bounds=None):
         bounds=bounds or _load_tile_bounds(),
         name_prefix="Baseline Hazard",
         min_pixels=1,
-        simplify_tolerance=0,
+        simplify_tolerance=0.0005,
         band_specs=[
             (1, "15%", "Baseline Hazard 15% Risk", 0.00, 0.151),
             (2, "30%", "Baseline Hazard 30% Risk", 0.151, 0.49),
@@ -235,13 +235,41 @@ def run_rainfall_simulation(
     scenario_metadata=None,
 ):
     """Run rainfall over the curated baseline hazard plus the local tensor model."""
+    total_rainfall_mm = max(float(rainfall_mm_per_hr), 0.0) * max(float(duration_hours), 0.0)
+    saturation_factor = max(float(saturation_factor), 0.0)
+    scenario_label = f"{total_rainfall_mm:.0f}mm/{duration_hours:.1f}h"
+    name_prefix = name_prefix or f"Rainfall Simulation {scenario_label}"
+
+    if total_rainfall_mm <= 0:
+        baseline_result = run_baseline_hazard_predictions(bounds=bounds)
+        scenario = {
+            "rainfall_mm_per_hr": float(rainfall_mm_per_hr),
+            "duration_hours": float(duration_hours),
+            "total_rainfall_mm": total_rainfall_mm,
+            "saturation_factor": saturation_factor,
+            "rainfall_boost": 0.0,
+            "scenario_pressure": 0.0,
+            "no_rainfall_passthrough": True,
+        }
+        if scenario_metadata:
+            scenario.update(scenario_metadata)
+
+        return {
+            "model": baseline_result["model"],
+            "checkpoint": baseline_result["checkpoint"],
+            "scenario": scenario,
+            "inference_check": {
+                **baseline_result["inference_check"],
+                "risk_surface": risk_surface,
+            },
+            "predictions": baseline_result["predictions"],
+        }
+
     model = load_model()
     input_image = SOUTHERN_LEYTE_TENSOR if SOUTHERN_LEYTE_TENSOR.exists() else DEFAULT_SAMPLE_IMAGE
     image = load_h5_image(input_image).astype("float32")
     baseline_hazard = _baseline_hazard_to_probability(_load_baseline_hazard_mask())
 
-    total_rainfall_mm = max(float(rainfall_mm_per_hr), 0.0) * max(float(duration_hours), 0.0)
-    saturation_factor = max(float(saturation_factor), 0.0)
     rainfall_boost = min(total_rainfall_mm / 250.0, 1.0) * min(saturation_factor, 5.0) / 5.0
     scenario_pressure = min((total_rainfall_mm / 500.0) * max(saturation_factor, 0.25), 1.0)
 
@@ -257,9 +285,6 @@ def run_rainfall_simulation(
         baseline_hazard + rainfall_adjustment + model_adjustment
     ).clip(0.0, 1.0)
     display_threshold = adaptive_mask_threshold(probability_array)
-    scenario_label = f"{total_rainfall_mm:.0f}mm/{duration_hours:.1f}h"
-    name_prefix = name_prefix or f"Rainfall Simulation {scenario_label}"
-
     predictions = probability_mask_to_risk_wkts(
         probability_array,
         bounds=bounds or _load_tile_bounds(),

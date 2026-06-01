@@ -808,8 +808,6 @@ def load_southern_leyte_municipality_boundaries():
             },
             "geometry": shape_record.shape.__geo_interface__,
         }
-        feature = clip_feature_to_prediction_tile(feature)
-
         if feature is not None:
             boundaries[name.lower()] = feature
 
@@ -1204,11 +1202,6 @@ def load_southern_leyte_barangay_boundaries():
             },
             "geometry": shape_record.shape.__geo_interface__,
         }
-        feature = clip_feature_to_prediction_tile(feature)
-
-        if feature is None:
-            continue
-
         barangays_by_municipality.setdefault(municipality_name.lower(), []).append(
             feature
         )
@@ -2464,12 +2457,11 @@ def replace_risk_zones(predictions):
         """
     )
 
-    with engine.begin() as conn:
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("DELETE FROM risk_zones;"))
-        rows = [
-            conn.execute(query, prediction).mappings().one()
-            for prediction in predictions
-        ]
+        rows = []
+        for prediction in predictions:
+            rows.append(conn.execute(query, prediction).mappings().one())
 
     calculate_barangay_risk_breakdown_from_json.cache_clear()
     return rows
