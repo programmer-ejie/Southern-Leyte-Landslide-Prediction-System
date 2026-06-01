@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { GeoJSON, ImageOverlay, MapContainer, Pane, TileLayer } from 'react-leaflet'
 import '../../public/admin_template/src/assets/scss/style.scss'
@@ -199,6 +199,7 @@ function DashboardPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [apiStatus, setApiStatus] = useState('checking')
+  const apiHasConnectedRef = useRef(false)
   const [riskStatus, setRiskStatus] = useState('loading')
   const [riskZones, setRiskZones] = useState(null)
   const [provinceBoundary, setProvinceBoundary] = useState(null)
@@ -212,6 +213,11 @@ function DashboardPage() {
   const [themeMode, setThemeMode] = useState(
     getStoredTheme,
   )
+
+  function markApiConnected() {
+    apiHasConnectedRef.current = true
+    setApiStatus('connected')
+  }
 
   const lossSummary = useMemo(() => buildLossSummary(riskZones), [riskZones])
   const riskDistribution = useMemo(
@@ -362,11 +368,13 @@ function DashboardPage() {
         .get(`${API_BASE_URL}/health`)
         .then(() => {
           failedHealthChecks = 0
-          if (isMounted) setApiStatus('connected')
+          if (isMounted) markApiConnected()
         })
         .catch(() => {
           failedHealthChecks += 1
-          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
+          if (isMounted && !apiHasConnectedRef.current && failedHealthChecks >= 3) {
+            setApiStatus('offline')
+          }
         })
     }
 
@@ -384,7 +392,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setRiskZones(response.data)
         setRiskStatus('loaded')
       })
@@ -397,7 +405,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/province-boundary`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setProvinceBoundary(response.data)
         setProvinceStatus('loaded')
       })
@@ -413,7 +421,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/municipality-boundaries`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setMunicipalityBoundaries(response.data)
         setMunicipalityStatus('loaded')
       })
@@ -429,7 +437,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/barangay-boundaries`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setBarangayBoundaries(response.data)
         setBarangayStatus('loaded')
       })

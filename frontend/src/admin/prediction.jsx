@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   GeoJSON,
@@ -607,6 +607,7 @@ function PredictionPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [apiStatus, setApiStatus] = useState('checking')
+  const apiHasConnectedRef = useRef(false)
   const [riskZones, setRiskZones] = useState(null)
   const [riskStatus, setRiskStatus] = useState('loading')
   const [municipalityStatus, setMunicipalityStatus] = useState('loading')
@@ -615,6 +616,11 @@ function PredictionPage() {
   const [themeMode, setThemeMode] = useState(
     getStoredTheme,
   )
+
+  function markApiConnected() {
+    apiHasConnectedRef.current = true
+    setApiStatus('connected')
+  }
   const [predictionStatus, setPredictionStatus] = useState('idle')
   const [livePredictionStatus, setLivePredictionStatus] = useState('idle')
   const [showPredictionLoader, setShowPredictionLoader] = useState(true)
@@ -804,7 +810,7 @@ function PredictionPage() {
     return axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setRiskZones(response.data)
         return loadProvinceBoundary().then(() => {
           setRiskStatus('loaded')
@@ -821,7 +827,7 @@ function PredictionPage() {
     return axios
       .get(`${API_BASE_URL}/province-boundary`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setProvinceBoundary(response.data)
       })
       .catch(() => setProvinceBoundary(null))
@@ -836,11 +842,13 @@ function PredictionPage() {
         .get(`${API_BASE_URL}/health`)
         .then(() => {
           failedHealthChecks = 0
-          if (isMounted) setApiStatus('connected')
+          if (isMounted) markApiConnected()
         })
         .catch(() => {
           failedHealthChecks += 1
-          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
+          if (isMounted && !apiHasConnectedRef.current && failedHealthChecks >= 3) {
+            setApiStatus('offline')
+          }
         })
     }
 
@@ -863,7 +871,7 @@ function PredictionPage() {
     axios
       .get(`${API_BASE_URL}/municipality-boundaries`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setMunicipalityBoundaries(response.data)
         setMunicipalityStatus('loaded')
       })
@@ -889,7 +897,7 @@ function PredictionPage() {
         )}`,
       )
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         if (isCurrentRequest && response.data?.geometry) {
           setSelectedMunicipalityBoundary(response.data)
         }
@@ -907,7 +915,7 @@ function PredictionPage() {
         )}/barangays`,
       )
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         if (isCurrentRequest) {
           setBarangayBoundaries(response.data)
         }
@@ -944,7 +952,7 @@ function PredictionPage() {
         )}/barangay/${encodeURIComponent(selectedBarangayName)}/risk-breakdown`,
       )
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setSelectedBarangayRiskBreakdown(response.data?.risk_breakdown ?? [])
       })
       .catch(() => setSelectedBarangayRiskBreakdown([]))

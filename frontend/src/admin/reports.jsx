@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
@@ -217,11 +217,17 @@ function ReportsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [apiStatus, setApiStatus] = useState('checking')
+  const apiHasConnectedRef = useRef(false)
   const [riskStatus, setRiskStatus] = useState('loading')
   const [riskZones, setRiskZones] = useState(null)
   const [themeMode, setThemeMode] = useState(
     getStoredTheme,
   )
+
+  function markApiConnected() {
+    apiHasConnectedRef.current = true
+    setApiStatus('connected')
+  }
   const [selectedMunicipality, setSelectedMunicipality] = useState('Bontoc')
   const [selectedReportType, setSelectedReportType] = useState('Risk Summary')
   const [selectedFormat, setSelectedFormat] = useState('PDF')
@@ -279,11 +285,13 @@ function ReportsPage() {
         .get(`${API_BASE_URL}/health`)
         .then(() => {
           failedHealthChecks = 0
-          if (isMounted) setApiStatus('connected')
+          if (isMounted) markApiConnected()
         })
         .catch(() => {
           failedHealthChecks += 1
-          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
+          if (isMounted && !apiHasConnectedRef.current && failedHealthChecks >= 3) {
+            setApiStatus('offline')
+          }
         })
     }
 
@@ -301,7 +309,7 @@ function ReportsPage() {
     axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setRiskZones(response.data)
         setRiskStatus('loaded')
       })
@@ -326,7 +334,7 @@ function ReportsPage() {
     return axios
       .get(`${API_BASE_URL}/reports`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setGeneratedReports(response.data?.reports ?? [])
       })
       .catch(() => setGeneratedReports([]))

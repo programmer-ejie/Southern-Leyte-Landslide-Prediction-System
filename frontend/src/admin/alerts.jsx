@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
@@ -111,11 +111,17 @@ function AlertsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [apiStatus, setApiStatus] = useState('checking')
+  const apiHasConnectedRef = useRef(false)
   const [alertStatus, setAlertStatus] = useState('loading')
   const [alertPayload, setAlertPayload] = useState(null)
   const [themeMode, setThemeMode] = useState(
     getStoredTheme,
   )
+
+  function markApiConnected() {
+    apiHasConnectedRef.current = true
+    setApiStatus('connected')
+  }
   const [selectedAlertId, setSelectedAlertId] = useState(null)
   const [alertPage, setAlertPage] = useState(1)
 
@@ -176,11 +182,13 @@ function AlertsPage() {
         .get(`${API_BASE_URL}/health`)
         .then(() => {
           failedHealthChecks = 0
-          if (isMounted) setApiStatus('connected')
+          if (isMounted) markApiConnected()
         })
         .catch(() => {
           failedHealthChecks += 1
-          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
+          if (isMounted && !apiHasConnectedRef.current && failedHealthChecks >= 3) {
+            setApiStatus('offline')
+          }
         })
     }
 
@@ -198,7 +206,7 @@ function AlertsPage() {
     axios
       .get(`${API_BASE_URL}/alerts`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setAlertPayload(response.data)
         setAlertStatus('loaded')
       })

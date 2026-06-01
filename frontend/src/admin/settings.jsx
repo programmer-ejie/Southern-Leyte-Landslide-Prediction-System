@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
@@ -10,6 +10,7 @@ function SettingsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [apiStatus, setApiStatus] = useState('checking')
+  const apiHasConnectedRef = useRef(false)
   const [dbStatus, setDbStatus] = useState('checking')
   const [modelStatus, setModelStatus] = useState('checking')
   const [themeMode, setThemeMode] = useState(
@@ -26,6 +27,11 @@ function SettingsPage() {
   const [metadataStatus, setMetadataStatus] = useState('loading')
   const [controlStatus, setControlStatus] = useState({})
   const [metadata, setMetadata] = useState(null)
+
+  function markApiConnected() {
+    apiHasConnectedRef.current = true
+    setApiStatus('connected')
+  }
 
   function applySettings(settings) {
     if (!settings) {
@@ -47,7 +53,7 @@ function SettingsPage() {
     return axios
       .get(`${API_BASE_URL}/system-settings`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         applySettings(response.data?.settings)
         setSettingsStatus('saved')
       })
@@ -60,7 +66,7 @@ function SettingsPage() {
     return axios
       .get(`${API_BASE_URL}/system-settings/metadata`)
       .then((response) => {
-        setApiStatus('connected')
+        markApiConnected()
         setMetadata(response.data)
         setMetadataStatus('loaded')
       })
@@ -140,11 +146,13 @@ function SettingsPage() {
         .get(`${API_BASE_URL}/health`)
         .then(() => {
           failedHealthChecks = 0
-          if (isMounted) setApiStatus('connected')
+          if (isMounted) markApiConnected()
         })
         .catch(() => {
           failedHealthChecks += 1
-          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
+          if (isMounted && !apiHasConnectedRef.current && failedHealthChecks >= 3) {
+            setApiStatus('offline')
+          }
         })
     }
 
@@ -154,7 +162,7 @@ function SettingsPage() {
     axios
       .get(`${API_BASE_URL}/db-health`)
       .then(() => {
-        setApiStatus('connected')
+        markApiConnected()
         setDbStatus('connected')
       })
       .catch(() => setDbStatus('offline'))
@@ -162,7 +170,7 @@ function SettingsPage() {
     axios
       .get(`${API_BASE_URL}/model-health`)
       .then(() => {
-        setApiStatus('connected')
+        markApiConnected()
         setModelStatus('loaded')
       })
       .catch(() => setModelStatus('offline'))
