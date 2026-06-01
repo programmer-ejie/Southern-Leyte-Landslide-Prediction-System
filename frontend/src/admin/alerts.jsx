@@ -169,15 +169,18 @@ function AlertsPage() {
 
   useEffect(() => {
     let isMounted = true
+    let failedHealthChecks = 0
 
     function checkApiHealth() {
       axios
         .get(`${API_BASE_URL}/health`)
         .then(() => {
+          failedHealthChecks = 0
           if (isMounted) setApiStatus('connected')
         })
         .catch(() => {
-          if (isMounted) setApiStatus('offline')
+          failedHealthChecks += 1
+          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
         })
     }
 
@@ -195,6 +198,7 @@ function AlertsPage() {
     axios
       .get(`${API_BASE_URL}/alerts`)
       .then((response) => {
+        setApiStatus('connected')
         setAlertPayload(response.data)
         setAlertStatus('loaded')
       })

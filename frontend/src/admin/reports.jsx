@@ -272,15 +272,18 @@ function ReportsPage() {
 
   useEffect(() => {
     let isMounted = true
+    let failedHealthChecks = 0
 
     function checkApiHealth() {
       axios
         .get(`${API_BASE_URL}/health`)
         .then(() => {
+          failedHealthChecks = 0
           if (isMounted) setApiStatus('connected')
         })
         .catch(() => {
-          if (isMounted) setApiStatus('offline')
+          failedHealthChecks += 1
+          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
         })
     }
 
@@ -298,6 +301,7 @@ function ReportsPage() {
     axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
+        setApiStatus('connected')
         setRiskZones(response.data)
         setRiskStatus('loaded')
       })
@@ -321,7 +325,10 @@ function ReportsPage() {
   function loadGeneratedReports() {
     return axios
       .get(`${API_BASE_URL}/reports`)
-      .then((response) => setGeneratedReports(response.data?.reports ?? []))
+      .then((response) => {
+        setApiStatus('connected')
+        setGeneratedReports(response.data?.reports ?? [])
+      })
       .catch(() => setGeneratedReports([]))
   }
 

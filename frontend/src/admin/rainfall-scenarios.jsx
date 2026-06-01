@@ -285,6 +285,7 @@ function RainfallScenariosPage() {
     return axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
+        setApiStatus('connected')
         setRiskZones(response.data)
         setRiskStatus('loaded')
         return response.data
@@ -301,6 +302,7 @@ function RainfallScenariosPage() {
     return axios
       .get(`${API_BASE_URL}/province-boundary`)
       .then((response) => {
+        setApiStatus('connected')
         setProvinceBoundary(response.data)
         setProvinceBoundaryStatus('ready')
       })
@@ -316,6 +318,7 @@ function RainfallScenariosPage() {
     return axios
       .get(`${API_BASE_URL}/municipality-boundaries`)
       .then((response) => {
+        setApiStatus('connected')
         setMunicipalityBoundaries(response.data)
         setMunicipalityStatus('ready')
       })
@@ -331,6 +334,7 @@ function RainfallScenariosPage() {
     return axios
       .get(`${API_BASE_URL}/barangay-boundaries`)
       .then((response) => {
+        setApiStatus('connected')
         setBarangayBoundaries(response.data)
         setBarangayStatus('ready')
       })
@@ -346,6 +350,7 @@ function RainfallScenariosPage() {
     return axios
       .get(`${API_BASE_URL}/rainfall-simulation-logs`)
       .then((response) => {
+        setApiStatus('connected')
         setSimulationLogs((response.data?.logs ?? []).map(simulationLogFromApi))
         setSimulationLogStatus('ready')
       })
@@ -354,15 +359,18 @@ function RainfallScenariosPage() {
 
   useEffect(() => {
     let isMounted = true
+    let failedHealthChecks = 0
 
     function checkApiHealth() {
       axios
         .get(`${API_BASE_URL}/health`)
         .then(() => {
+          failedHealthChecks = 0
           if (isMounted) setApiStatus('connected')
         })
         .catch(() => {
-          if (isMounted) setApiStatus('offline')
+          failedHealthChecks += 1
+          if (isMounted && failedHealthChecks >= 3) setApiStatus('offline')
         })
     }
 
