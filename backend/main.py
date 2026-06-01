@@ -232,6 +232,44 @@ def bootstrap_admin_user():
         )
 
 
+def ensure_risk_zones_table():
+    with engine.begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS risk_zones (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    risk_level TEXT NOT NULL,
+                    probability DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    geom geometry(MultiPolygon, 4326) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE risk_zones
+                ALTER COLUMN geom TYPE geometry(MultiPolygon, 4326)
+                USING ST_Multi(geom);
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS risk_zones_geom_idx
+                ON risk_zones
+                USING GIST (geom);
+                """
+            )
+        )
+
+
 def hash_password(password: str, salt: str) -> str:
     return hashlib.pbkdf2_hmac(
         "sha256",
@@ -307,6 +345,7 @@ def prepare_auth_users():
         )
 
     bootstrap_admin_user()
+    ensure_risk_zones_table()
     ensure_rainfall_simulation_logs_table()
     ensure_system_settings_table()
     ensure_alerts_table()
@@ -2415,7 +2454,7 @@ def replace_risk_zones(predictions):
             :name,
             :risk_level,
             :probability,
-            ST_GeomFromText(:wkt, 4326)
+            ST_Multi(ST_GeomFromText(:wkt, 4326))
         )
         ON CONFLICT (name) DO UPDATE SET
             risk_level = EXCLUDED.risk_level,
