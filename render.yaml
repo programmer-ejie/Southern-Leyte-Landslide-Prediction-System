@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: southern-leyte-landslide-api
+    env: python
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: OPEN_METEO_FORECAST_URL
+        value: https://api.open-meteo.com/v1/forecast

@@ -1,0 +1,7 @@
+asset_type,exposure_quantity,unit,replacement_cost_php,estimated_total_value_php,source,source_url
+residential_building,68660.0,building,250000,17165000000,OSM building count + editable unit-cost assumption,https://www.openstreetmap.org
+road,1789.935,km,12000000,21479219240,OSM road length + editable DPWH/LGU-style unit-cost assumption,https://www.openstreetmap.org
+bridge,262.0,feature,5000000,1310000000,OSM bridge count + editable unit-cost assumption,https://www.openstreetmap.org
+school,473.0,facility,5000000,2365000000,OSM school count + editable unit-cost assumption,https://www.openstreetmap.org
+health_facility,41.0,facility,8000000,328000000,OSM health-facility count + editable unit-cost assumption,https://www.openstreetmap.org
+emergency_facility,60.0,facility,4000000,240000000,OSM emergency-facility count + editable unit-cost assumption,https://www.openstreetmap.org

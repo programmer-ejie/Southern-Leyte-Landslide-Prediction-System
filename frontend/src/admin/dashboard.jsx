@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
-import { GeoJSON, MapContainer, Pane, TileLayer } from 'react-leaflet'
+import { GeoJSON, ImageOverlay, MapContainer, Pane, TileLayer } from 'react-leaflet'
 import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
@@ -11,6 +11,10 @@ const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
 const SOUTHERN_LEYTE_BOUNDS = [
   [9.78, 124.68],
   [10.66, 125.42],
+]
+const BASELINE_RISK_IMAGE_BOUNDS = [
+  [9.88, 124.62],
+  [10.55, 125.35],
 ]
 
 const riskStyles = {
@@ -51,16 +55,73 @@ const currencyFormatter = new Intl.NumberFormat('en-PH', {
   maximumFractionDigits: 0,
 })
 
+const compactCurrencyFormatter = new Intl.NumberFormat('en-PH', {
+  maximumFractionDigits: 2,
+  notation: 'compact',
+  compactDisplay: 'short',
+})
+
 function formatNumber(value) {
   return numberFormatter.format(value ?? 0)
+}
+
+const riskPaneByLevel = {
+  Low: 'risk-low',
+  Medium: 'risk-medium',
+  High: 'risk-high',
+  '15%': 'risk-15',
+  '30%': 'risk-30',
+  '50%': 'risk-50',
+  '75%': 'risk-75',
+  '100%': 'risk-100',
 }
 
 function formatPeso(value) {
   return `PHP ${currencyFormatter.format(value ?? 0)}`
 }
 
+function formatCompactPeso(value) {
+  return `PHP ${compactCurrencyFormatter.format(value ?? 0)}`
+}
+
 function getRiskStyle(feature) {
-  return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
+  const style = riskStyles[feature.properties.risk_level] ?? riskStyles.Low
+
+  if (feature.properties.name?.startsWith('Baseline Hazard')) {
+    return {
+      ...style,
+      color: style.fillColor,
+      fillColor: style.fillColor,
+      fillOpacity: 0.46,
+      opacity: 0.42,
+      stroke: true,
+      weight: 0.65,
+    }
+  }
+
+  return style
+}
+
+function getActiveLayerInfo(riskZones) {
+  const firstName = riskZones?.features?.[0]?.properties?.name ?? ''
+
+  if (firstName.startsWith('Baseline Hazard')) {
+    return 'Primary layer: baseline hazard + local tensor'
+  }
+
+  if (firstName.startsWith('Live Rainfall Prediction')) {
+    return 'Primary layer: live rainfall + baseline hazard + local tensor'
+  }
+
+  if (firstName.startsWith('Rainfall Simulation')) {
+    return 'Primary layer: rainfall scenario + local tensor'
+  }
+
+  if (firstName.startsWith('Attention U-Net')) {
+    return 'Primary layer: Attention U-Net + local tensor'
+  }
+
+  return 'Primary prediction layer from database'
 }
 
 function buildLossSummary(riskZones) {
@@ -140,6 +201,13 @@ function DashboardPage() {
   const [apiStatus, setApiStatus] = useState('checking')
   const [riskStatus, setRiskStatus] = useState('loading')
   const [riskZones, setRiskZones] = useState(null)
+  const [provinceBoundary, setProvinceBoundary] = useState(null)
+  const [provinceStatus, setProvinceStatus] = useState('loading')
+  const [municipalityBoundaries, setMunicipalityBoundaries] = useState(null)
+  const [municipalityStatus, setMunicipalityStatus] = useState('loading')
+  const [barangayBoundaries, setBarangayBoundaries] = useState(null)
+  const [barangayStatus, setBarangayStatus] = useState('loading')
+  const [baselineOverlayStatus, setBaselineOverlayStatus] = useState('idle')
   const [showMapLoader, setShowMapLoader] = useState(true)
   const [themeMode, setThemeMode] = useState(
     getStoredTheme,
@@ -152,6 +220,27 @@ function DashboardPage() {
   )
   const highestRiskZones = useMemo(() => getHighestRiskZones(riskZones), [riskZones])
   const mappedZones = riskZones?.features?.length ?? 0
+  const hasBaselineRiskLayer = riskZones?.features?.some((feature) =>
+    feature.properties.name?.startsWith('Baseline Hazard'),
+  )
+  const baselineOverlayVersion =
+    riskZones?.features
+      ?.filter((feature) => feature.properties.name?.startsWith('Baseline Hazard'))
+      .map((feature) => feature.properties.id)
+      .join('-') || 'baseline'
+  const activeLayerDetail = getActiveLayerInfo(riskZones)
+  const shouldShowBaselineOverlay =
+    hasBaselineRiskLayer ||
+    riskZones?.features?.some((feature) =>
+      /^(Live Rainfall Prediction|Rainfall Simulation)/.test(
+        feature.properties.name ?? '',
+      ),
+    )
+  const riskLayerVersion =
+    riskZones?.features?.map((feature) => feature.properties.id).join('-') || 'empty'
+  const displayedBaselineOverlayVersion = hasBaselineRiskLayer
+    ? baselineOverlayVersion
+    : `baseline-underlay-${riskLayerVersion}`
   const highRiskZones =
     riskZones?.features?.filter((feature) =>
       ['75%', '100%', 'High'].includes(feature.properties.risk_level),
@@ -173,7 +262,66 @@ function DashboardPage() {
           0,
         ) / mappedZones
       : 0
-  const isMapLoading = riskStatus === 'loading'
+  const isMapLoading =
+    riskStatus === 'loading' ||
+    provinceStatus === 'loading' ||
+    municipalityStatus === 'loading' ||
+    barangayStatus === 'loading' ||
+    baselineOverlayStatus === 'loading'
+  const mapLoaderChecklist = [
+    {
+      label: 'Prediction layer',
+      detail: activeLayerDetail.replace('Primary layer: ', ''),
+      status:
+        riskStatus === 'loading'
+          ? 'loading'
+          : riskStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Baseline overlay',
+      detail: 'Local tensor hazard raster',
+      status:
+        !shouldShowBaselineOverlay
+          ? 'ready'
+          : baselineOverlayStatus === 'loading'
+            ? 'loading'
+            : baselineOverlayStatus === 'unavailable'
+              ? 'error'
+              : 'ready',
+    },
+    {
+      label: 'Province boundary',
+      detail: 'Southern Leyte mask',
+      status:
+        provinceStatus === 'loading'
+          ? 'loading'
+          : provinceStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Municipalities',
+      detail: 'Borders and municipality names',
+      status:
+        municipalityStatus === 'loading'
+          ? 'loading'
+          : municipalityStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+    {
+      label: 'Barangays',
+      detail: 'Barangay borders only',
+      status:
+        barangayStatus === 'loading'
+          ? 'loading'
+          : barangayStatus === 'unavailable'
+            ? 'error'
+            : 'ready',
+    },
+  ]
 
   useEffect(() => {
     applyTheme(themeMode)
@@ -197,6 +345,15 @@ function DashboardPage() {
   }, [isMapLoading])
 
   useEffect(() => {
+    if (shouldShowBaselineOverlay) {
+      setBaselineOverlayStatus('loading')
+      return
+    }
+
+    setBaselineOverlayStatus('idle')
+  }, [displayedBaselineOverlayVersion, shouldShowBaselineOverlay])
+
+  useEffect(() => {
     axios
       .get(`${API_BASE_URL}/health`)
       .then(() => setApiStatus('connected'))
@@ -212,6 +369,51 @@ function DashboardPage() {
         setRiskStatus('loaded')
       })
       .catch(() => setRiskStatus('unavailable'))
+  }, [])
+
+  useEffect(() => {
+    setProvinceStatus('loading')
+
+    axios
+      .get(`${API_BASE_URL}/province-boundary`)
+      .then((response) => {
+        setProvinceBoundary(response.data)
+        setProvinceStatus('loaded')
+      })
+      .catch(() => {
+        setProvinceBoundary(null)
+        setProvinceStatus('unavailable')
+      })
+  }, [])
+
+  useEffect(() => {
+    setMunicipalityStatus('loading')
+
+    axios
+      .get(`${API_BASE_URL}/municipality-boundaries`)
+      .then((response) => {
+        setMunicipalityBoundaries(response.data)
+        setMunicipalityStatus('loaded')
+      })
+      .catch(() => {
+        setMunicipalityBoundaries(null)
+        setMunicipalityStatus('unavailable')
+      })
+  }, [])
+
+  useEffect(() => {
+    setBarangayStatus('loading')
+
+    axios
+      .get(`${API_BASE_URL}/barangay-boundaries`)
+      .then((response) => {
+        setBarangayBoundaries(response.data)
+        setBarangayStatus('loaded')
+      })
+      .catch(() => {
+        setBarangayBoundaries(null)
+        setBarangayStatus('unavailable')
+      })
   }, [])
 
   return (
@@ -417,7 +619,7 @@ function DashboardPage() {
                 icon="ti-cash-banknote"
                 iconClassName="bg-info"
                 label="Economic Exposure"
-                value={formatPeso(lossSummary.economicLoss)}
+                value={formatCompactPeso(lossSummary.economicLoss)}
                 note="Estimated loss"
                 noteClassName="text-info"
               />
@@ -430,7 +632,7 @@ function DashboardPage() {
                 <div className="card-header d-flex justify-content-between align-items-center bg-transparent px-4 py-3">
                   <div>
                     <h3 className="h5 mb-0">Southern Leyte Overview</h3>
-                    <small className="text-secondary">Province risk layer preview</small>
+                    <small className="text-secondary">{activeLayerDetail}</small>
                   </div>
                   <a className="btn btn-sm btn-outline-primary" href="/admin/prediction">
                     Open Map
@@ -456,22 +658,144 @@ function DashboardPage() {
                         url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png"
                       />
                       <Pane name="dashboard-risk" style={{ zIndex: 420 }} />
+                      <Pane name="barangay-boundary-lines" style={{ zIndex: 555 }} />
+                      <Pane name="municipality-boundaries" style={{ zIndex: 565 }} />
+                      <Pane name="municipality-labels" style={{ zIndex: 570 }} />
+                      <Pane name="baseline-risk-image" style={{ zIndex: 490 }} />
+                      <Pane name="risk-low" style={{ zIndex: 500 }} />
+                      <Pane name="risk-medium" style={{ zIndex: 510 }} />
+                      <Pane name="risk-high" style={{ zIndex: 520 }} />
+                      <Pane name="risk-15" style={{ zIndex: 500 }} />
+                      <Pane name="risk-30" style={{ zIndex: 510 }} />
+                      <Pane name="risk-50" style={{ zIndex: 520 }} />
+                      <Pane name="risk-75" style={{ zIndex: 530 }} />
+                      <Pane name="risk-100" style={{ zIndex: 540 }} />
+                      <Pane name="province-boundary" style={{ zIndex: 580 }} />
+                      {shouldShowBaselineOverlay && (
+                        <ImageOverlay
+                          bounds={BASELINE_RISK_IMAGE_BOUNDS}
+                          eventHandlers={{
+                            load: () => setBaselineOverlayStatus('loaded'),
+                            error: () => setBaselineOverlayStatus('unavailable'),
+                          }}
+                          pane="baseline-risk-image"
+                          url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`}
+                          opacity={1}
+                        />
+                      )}
+                      {provinceBoundary?.geometry && (
+                        <GeoJSON
+                          key="dashboard-southern-leyte-province-boundary"
+                          data={provinceBoundary}
+                          pane="province-boundary"
+                          interactive={false}
+                          style={{
+                            className: 'province-boundary',
+                            color: '#111827',
+                            fillColor: '#111827',
+                            fillOpacity: 0,
+                            opacity: 1,
+                            weight: hasBaselineRiskLayer ? 3.5 : 4,
+                          }}
+                        />
+                      )}
+                      {barangayBoundaries?.features?.length > 0 && (
+                        <GeoJSON
+                          key={`dashboard-barangays-${barangayBoundaries.features.length}`}
+                          data={barangayBoundaries}
+                          pane="barangay-boundary-lines"
+                          interactive={false}
+                          style={{
+                            className: 'barangay-boundary dashboard-barangay-boundary',
+                            color: '#111827',
+                            fillColor: '#ffffff',
+                            fillOpacity: 0,
+                            opacity: 0.52,
+                            weight: 0.7,
+                          }}
+                        />
+                      )}
+                      {municipalityBoundaries?.features?.length > 0 && (
+                        <GeoJSON
+                          key={`dashboard-municipalities-${municipalityBoundaries.features.length}`}
+                          data={municipalityBoundaries}
+                          pane="municipality-boundaries"
+                          interactive={false}
+                          style={{
+                            className: 'dashboard-municipality-boundary',
+                            color: '#0f172a',
+                            fillColor: '#ffffff',
+                            fillOpacity: 0,
+                            opacity: 0.9,
+                            weight: 1.4,
+                          }}
+                        />
+                      )}
+                      {municipalityBoundaries?.features?.length > 0 && (
+                        <GeoJSON
+                          key={`dashboard-municipality-labels-${municipalityBoundaries.features.length}`}
+                          data={municipalityBoundaries}
+                          pane="municipality-labels"
+                          interactive={false}
+                          style={{
+                            color: 'transparent',
+                            fillOpacity: 0,
+                            opacity: 0,
+                            weight: 0,
+                          }}
+                          onEachFeature={(municipalityFeature, layer) => {
+                            layer.bindTooltip(municipalityFeature.properties.name, {
+                              className: 'municipality-label dashboard-municipality-label',
+                              direction: 'center',
+                              permanent: true,
+                            })
+                          }}
+                        />
+                      )}
                       {riskZones?.features?.map((feature) => (
+                        hasBaselineRiskLayer &&
+                        feature.properties.name?.startsWith('Baseline Hazard') ? null : (
                         <GeoJSON
                           key={`${feature.properties.id}-${feature.properties.risk_level}`}
                           data={feature}
-                          pane="dashboard-risk"
+                          pane={
+                            riskPaneByLevel[feature.properties.risk_level] ??
+                            'dashboard-risk'
+                          }
                           style={getRiskStyle}
                         />
+                        )
                       ))}
                     </MapContainer>
                     {showMapLoader && (
                       <div className="prediction-loader" aria-live="polite">
                         <div className="prediction-loader-panel">
                           <span className="prediction-loader-ring"></span>
-                          <div>
+                          <div className="prediction-loader-content">
                             <strong>Loading overview map</strong>
-                            <span>Preparing province risk layers</span>
+                            <span>Preparing prediction, boundary, and label layers</span>
+                            <ul className="prediction-loader-checklist">
+                              {mapLoaderChecklist.map((item) => (
+                                <li
+                                  key={item.label}
+                                  className={`prediction-loader-check prediction-loader-check--${item.status}`}
+                                >
+                                  <i
+                                    className={`ti ${
+                                      item.status === 'ready'
+                                        ? 'ti-check'
+                                        : item.status === 'error'
+                                          ? 'ti-alert-circle'
+                                          : 'ti-loader-2'
+                                    }`}
+                                  ></i>
+                                  <span>
+                                    <b>{item.label}</b>
+                                    <small>{item.detail}</small>
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
                           </div>
                         </div>
                       </div>
@@ -576,7 +900,7 @@ function DashboardPage() {
                     <div
                       className="probability-gauge-fill"
                       style={{
-                        transform: `rotate(${highestProbability * 180}deg)`,
+                        transform: `rotate(${(1 - Math.max(0, Math.min(1, highestProbability))) * 180}deg)`,
                       }}
                     ></div>
                     <div className="probability-gauge-cover">
@@ -653,7 +977,7 @@ function DashboardPage() {
                     />
                     <FigureTile
                       label="Economic exposure"
-                      value={formatPeso(lossSummary.economicLoss)}
+                      value={formatCompactPeso(lossSummary.economicLoss)}
                       icon="ti-cash-banknote"
                     />
                     <FigureTile
@@ -731,7 +1055,7 @@ function SummaryCard({
   noteClassName,
 }) {
   return (
-    <div className={`card p-4 border rounded-2 h-100 ${className}`}>
+    <div className={`card report-metric-card dashboard-summary-card p-4 border rounded-2 h-100 ${className}`}>
       <div className="d-flex gap-3">
         <div className={`icon-shape icon-md text-white rounded-2 ${iconClassName}`}>
           <i className={`ti ${icon} fs-4`}></i>

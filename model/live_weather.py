@@ -1,10 +1,14 @@
 from datetime import datetime, timezone
+import os
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
 
 
-OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_FORECAST_URL = os.getenv(
+    "OPEN_METEO_FORECAST_URL",
+    "https://api.open-meteo.com/v1/forecast",
+)
 SOUTHERN_LEYTE_LATITUDE = 10.22
 SOUTHERN_LEYTE_LONGITUDE = 125.05
 

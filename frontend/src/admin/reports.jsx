@@ -36,6 +36,8 @@ const REPORT_TYPES = [
   'Barangay Exposure',
 ]
 
+const GENERATED_REPORTS_PER_PAGE = 5
+
 const riskLabelByLevel = {
   '15%': 'Low',
   '30%': 'Slightly Low',
@@ -69,6 +71,45 @@ function formatNumber(value) {
 
 function formatPeso(value) {
   return `PHP ${currencyFormatter.format(value ?? 0)}`
+}
+
+function formatCompactPeso(value) {
+  const amount = Number(value ?? 0)
+
+  if (Math.abs(amount) >= 1_000_000_000) {
+    return `PHP ${(amount / 1_000_000_000).toFixed(2)}B`
+  }
+
+  if (Math.abs(amount) >= 1_000_000) {
+    return `PHP ${(amount / 1_000_000).toFixed(2)}M`
+  }
+
+  if (Math.abs(amount) >= 1_000) {
+    return `PHP ${(amount / 1_000).toFixed(1)}K`
+  }
+
+  return formatPeso(amount)
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return 'Not generated'
+  }
+
+  return new Intl.DateTimeFormat('en-PH', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Manila',
+  }).format(new Date(value))
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
 function buildLossSummary(riskZones) {
@@ -139,6 +180,39 @@ function getHighestRiskZone(riskZones) {
   )[0]
 }
 
+function buildDecisionTreeRecommendation({
+  highRiskZones,
+  latestProbability,
+  affectedPeople,
+  economicLoss,
+}) {
+  if (highRiskZones > 0 && latestProbability >= 0.75) {
+    return {
+      level: 'Immediate response',
+      text: 'Decision tree result: High or very high probability zones are present. Prioritize field validation, barangay advisories, evacuation readiness, and road closure review for exposed areas.',
+    }
+  }
+
+  if (affectedPeople >= 50000 || economicLoss >= 1000000000) {
+    return {
+      level: 'Preparedness escalation',
+      text: 'Decision tree result: Exposure is high even if the top probability is moderate. Prepare response resources, validate exposed barangays, and coordinate with municipal disaster teams.',
+    }
+  }
+
+  if (latestProbability >= 0.45) {
+    return {
+      level: 'Monitoring',
+      text: 'Decision tree result: Moderate risk is present. Continue rainfall and slope monitoring, inspect drainage, and keep barangay officials informed.',
+    }
+  }
+
+  return {
+    level: 'Routine watch',
+    text: 'Decision tree result: No high-priority trigger is currently present. Maintain routine monitoring and update the report after new rainfall or model data.',
+  }
+}
+
 function ReportsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -151,6 +225,10 @@ function ReportsPage() {
   const [selectedMunicipality, setSelectedMunicipality] = useState('Bontoc')
   const [selectedReportType, setSelectedReportType] = useState('Risk Summary')
   const [selectedFormat, setSelectedFormat] = useState('PDF')
+  const [generatedReports, setGeneratedReports] = useState([])
+  const [reportStatus, setReportStatus] = useState('idle')
+  const [currentReport, setCurrentReport] = useState(null)
+  const [reportsPage, setReportsPage] = useState(1)
 
   const lossSummary = useMemo(() => buildLossSummary(riskZones), [riskZones])
   const riskDistribution = useMemo(
@@ -165,6 +243,24 @@ function ReportsPage() {
       ['75%', '100%', 'High'].includes(feature.properties.risk_level),
     ).length ?? 0
   const latestProbability = highestRiskZone?.properties?.probability ?? 0
+  const decisionRecommendation = useMemo(
+    () =>
+      buildDecisionTreeRecommendation({
+        highRiskZones,
+        latestProbability,
+        affectedPeople: lossSummary.people,
+        economicLoss: lossSummary.economicLoss,
+      }),
+    [highRiskZones, latestProbability, lossSummary.economicLoss, lossSummary.people],
+  )
+  const totalReportPages = Math.max(
+    1,
+    Math.ceil(generatedReports.length / GENERATED_REPORTS_PER_PAGE),
+  )
+  const pagedGeneratedReports = generatedReports.slice(
+    (reportsPage - 1) * GENERATED_REPORTS_PER_PAGE,
+    reportsPage * GENERATED_REPORTS_PER_PAGE,
+  )
 
   useEffect(() => {
     applyTheme(themeMode)
@@ -192,26 +288,312 @@ function ReportsPage() {
       .catch(() => setRiskStatus('unavailable'))
   }, [])
 
-  const reportRows = [
-    {
-      name: `${selectedMunicipality} ${selectedReportType}`,
-      area: selectedMunicipality,
-      type: selectedReportType,
-      status: riskStatus,
-    },
-    {
-      name: 'Province Risk Summary',
-      area: 'Southern Leyte',
-      type: 'Risk Summary',
-      status: riskStatus,
-    },
-    {
-      name: 'Estimated Loss Register',
-      area: 'Southern Leyte',
-      type: 'Loss Estimate',
-      status: riskStatus,
-    },
-  ]
+  useEffect(() => {
+    loadGeneratedReports()
+  }, [])
+
+  useEffect(() => {
+    setReportsPage(1)
+  }, [generatedReports.length])
+
+  useEffect(() => {
+    if (reportsPage > totalReportPages) {
+      setReportsPage(totalReportPages)
+    }
+  }, [reportsPage, totalReportPages])
+
+  function loadGeneratedReports() {
+    return axios
+      .get(`${API_BASE_URL}/reports`)
+      .then((response) => setGeneratedReports(response.data?.reports ?? []))
+      .catch(() => setGeneratedReports([]))
+  }
+
+  function generateReportPayload(format = selectedFormat) {
+    setReportStatus('generating')
+
+    return axios
+      .post(`${API_BASE_URL}/reports`, {
+        municipality: selectedMunicipality,
+        report_type: selectedReportType,
+        format,
+      })
+      .then((response) => {
+        const report = response.data?.report
+        setCurrentReport(report)
+        setGeneratedReports((reports) => [report, ...reports.filter((item) => item.id !== report.id)])
+        setReportStatus('generated')
+        return report
+      })
+      .catch((error) => {
+        setReportStatus('failed')
+        throw error
+      })
+  }
+
+  function reportCsvRows(report) {
+    const payload = report?.payload ?? {}
+    return payload.focus_rows?.length
+      ? payload.focus_rows.map((row) => ({ report: report.name, ...row }))
+      : (payload.top_barangays ?? []).map((barangay) => ({
+          report: report.name,
+          municipality: barangay.municipality,
+          barangay: barangay.barangay,
+          coveragePercent: barangay.max_coverage_percent,
+          affectedPeople: barangay.estimated_affected_people,
+          economicLossPhp: barangay.estimated_economic_loss_php,
+          possibleCasualties: barangay.estimated_possible_casualties,
+        }))
+  }
+
+  function downloadReportCsv(report) {
+    const rows = reportCsvRows(report)
+    const headers = Object.keys(rows[0] ?? { message: 'No barangay rows available' })
+    const csvLines = [
+      headers.join(','),
+      ...rows.map((row) =>
+        headers
+          .map((header) => `"${String(row[header] ?? '').replace(/"/g, '""')}"`)
+          .join(','),
+      ),
+    ]
+    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${report.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function printReportDocument(report) {
+    const payload = report?.payload ?? {}
+    const summary = payload.summary ?? report?.summary ?? {}
+    const logoUrl = `${window.location.origin}/website_logo.webp`
+    const generatedAt = formatTimestamp(report?.createdAt ?? payload.generated_at)
+    const focusColumns = payload.focus_columns ?? []
+    const focusRows = payload.focus_rows ?? []
+    const focusHeader = focusColumns
+      .map((column) => `<th>${escapeHtml(column)}</th>`)
+      .join('')
+    const formatReportCell = (column, value) => {
+      if (/loss/i.test(column)) return formatPeso(value)
+      if (/people|casualt|zones|duration|saturation|rainfall|coverage/i.test(column)) {
+        return /coverage/i.test(column) ? `${formatNumber(value)}%` : formatNumber(value)
+      }
+      return escapeHtml(value)
+    }
+    const focusBody = focusRows
+      .map(
+        (row) => `
+          <tr>
+            ${focusColumns
+              .map((column) => `<td>${formatReportCell(column, row[column])}</td>`)
+              .join('')}
+          </tr>
+        `,
+      )
+      .join('')
+    const reportHtml = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>${escapeHtml(report.name)}</title>
+          <style>
+            @page { size: A4; margin: 16mm; }
+            * { box-sizing: border-box; }
+            body {
+              margin: 0;
+              color: #111827;
+              font-family: Arial, Helvetica, sans-serif;
+              line-height: 1.45;
+            }
+            .document {
+              max-width: 780px;
+              margin: 0 auto;
+            }
+            .header {
+              display: flex;
+              align-items: center;
+              gap: 16px;
+              padding-bottom: 16px;
+              border-bottom: 3px solid #1d4ed8;
+            }
+            .header img {
+              width: 72px;
+              height: 72px;
+              object-fit: contain;
+            }
+            .system-title {
+              margin: 0;
+              color: #0f172a;
+              font-size: 20px;
+              font-weight: 800;
+            }
+            .system-subtitle {
+              margin: 4px 0 0;
+              color: #475569;
+              font-size: 12px;
+              letter-spacing: 0.08em;
+              text-transform: uppercase;
+            }
+            .title {
+              margin: 24px 0 4px;
+              color: #1d4ed8;
+              font-size: 24px;
+              font-weight: 900;
+              text-align: center;
+              text-transform: uppercase;
+            }
+            .meta {
+              margin: 0 0 20px;
+              color: #475569;
+              font-size: 12px;
+              text-align: center;
+            }
+            .summary {
+              padding: 14px 16px;
+              border: 1px solid #bfdbfe;
+              border-left: 5px solid #2563eb;
+              background: #eff6ff;
+            }
+            .grid {
+              display: grid;
+              grid-template-columns: repeat(3, 1fr);
+              gap: 10px;
+              margin: 18px 0;
+            }
+            .box {
+              padding: 12px;
+              border: 1px solid #dbe4f0;
+              border-radius: 8px;
+            }
+            .box span {
+              display: block;
+              color: #64748b;
+              font-size: 10px;
+              font-weight: 800;
+              text-transform: uppercase;
+            }
+            .box strong {
+              display: block;
+              margin-top: 5px;
+              font-size: 15px;
+            }
+            h2 {
+              margin: 22px 0 8px;
+              color: #0f172a;
+              font-size: 16px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 8px;
+              font-size: 11px;
+            }
+            th,
+            td {
+              padding: 7px;
+              border: 1px solid #dbe4f0;
+              text-align: left;
+              vertical-align: top;
+            }
+            th {
+              background: #f1f5f9;
+              color: #334155;
+              font-size: 10px;
+              text-transform: uppercase;
+            }
+            .notice {
+              margin-top: 18px;
+              padding: 12px;
+              border: 1px solid #fde68a;
+              background: #fffbeb;
+              color: #78350f;
+              font-weight: 700;
+            }
+            .footer {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 32px;
+              margin-top: 42px;
+              font-size: 12px;
+            }
+            .signature {
+              padding-top: 36px;
+              border-top: 1px solid #94a3b8;
+              text-align: center;
+            }
+            @media print {
+              body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+            }
+          </style>
+        </head>
+        <body>
+          <main class="document">
+            <header class="header">
+              <img src="${logoUrl}" alt="Southern Leyte Landslide Prediction logo" />
+              <div>
+                <h1 class="system-title">Southern Leyte Landslide Prediction System</h1>
+                <p class="system-subtitle">Geospatial risk intelligence and rainfall scenario monitoring</p>
+              </div>
+            </header>
+            <h2 class="title">${escapeHtml(report.name)}</h2>
+            <p class="meta">Generated ${escapeHtml(generatedAt)} · ${escapeHtml(report.reportType)} · ${escapeHtml(report.format)}</p>
+            <section class="summary">
+              <strong>Report Summary</strong>
+              <p>${escapeHtml(payload.recommendation)}</p>
+            </section>
+            <section class="grid">
+              <div class="box"><span>Risk zones</span><strong>${formatNumber(summary.risk_zones)}</strong></div>
+              <div class="box"><span>High risk zones</span><strong>${formatNumber(summary.high_risk_zones)}</strong></div>
+              <div class="box"><span>Highest probability</span><strong>${Math.round((summary.highest_probability ?? 0) * 100)}%</strong></div>
+              <div class="box"><span>Affected people</span><strong>${formatNumber(summary.affected_people)}</strong></div>
+              <div class="box"><span>Economic loss</span><strong>${formatPeso(summary.economic_loss_php)}</strong></div>
+              <div class="box"><span>Possible casualties</span><strong>${formatNumber(summary.possible_casualties)}</strong></div>
+            </section>
+            <h2>${escapeHtml(payload.focus_title ?? 'Report Details')}</h2>
+            <table>
+              <thead><tr>${focusHeader}</tr></thead>
+              <tbody>${focusBody || `<tr><td colspan="${Math.max(focusColumns.length, 1)}">No rows available.</td></tr>`}</tbody>
+            </table>
+            <div class="notice">
+              Planning report generated from model predictions and exposure estimates. Validate with LGU field reports before final operational decisions.
+            </div>
+            <footer class="footer">
+              <div class="signature">Prepared by</div>
+              <div class="signature">Authorized official</div>
+            </footer>
+          </main>
+          <script>
+            window.addEventListener('load', function () { window.print(); });
+          </script>
+        </body>
+      </html>
+    `
+    const reportWindow = window.open('', '_blank', 'width=900,height=1100')
+    if (!reportWindow) return
+    reportWindow.document.open()
+    reportWindow.document.write(reportHtml)
+    reportWindow.document.close()
+  }
+
+  function handleGenerateReport() {
+    generateReportPayload(selectedFormat).then((report) => {
+      if (selectedFormat === 'CSV') {
+        downloadReportCsv(report)
+      } else {
+        printReportDocument(report)
+      }
+    })
+  }
+
+  function handlePrintReport() {
+    generateReportPayload('Print').then((report) => {
+      printReportDocument(report)
+    })
+  }
 
   return (
     <>
@@ -404,7 +786,7 @@ function ReportsPage() {
               <ReportMetric
                 icon="ti-cash-banknote"
                 label="Economic Exposure"
-                value={formatPeso(lossSummary.economicLoss)}
+                value={formatCompactPeso(lossSummary.economicLoss)}
                 note="Estimated loss"
                 tone="info"
               />
@@ -465,15 +847,37 @@ function ReportsPage() {
                   </select>
 
                   <div className="d-flex gap-2 flex-wrap">
-                    <button type="button" className="btn btn-primary">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={handleGenerateReport}
+                      disabled={reportStatus === 'generating'}
+                    >
                       <i className="ti ti-file-export me-1"></i>
-                      Generate {selectedFormat}
+                      {reportStatus === 'generating'
+                        ? 'Generating...'
+                        : `Generate ${selectedFormat}`}
                     </button>
-                    <button type="button" className="btn btn-outline-primary">
+                    <button
+                      type="button"
+                      className="btn btn-outline-primary"
+                      onClick={handlePrintReport}
+                      disabled={reportStatus === 'generating'}
+                    >
                       <i className="ti ti-printer me-1"></i>
                       Print
                     </button>
                   </div>
+                  {reportStatus === 'generated' && (
+                    <p className="small text-success mt-3 mb-0">
+                      Report generated and saved to history.
+                    </p>
+                  )}
+                  {reportStatus === 'failed' && (
+                    <p className="small text-danger mt-3 mb-0">
+                      Report generation failed. Check the backend connection.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -487,24 +891,40 @@ function ReportsPage() {
                   <div className="report-preview">
                     <div>
                       <span className="prediction-kicker">Preview document</span>
-                      <h3>{selectedMunicipality} {selectedReportType}</h3>
+                      <h3>{currentReport?.name ?? `${selectedMunicipality} ${selectedReportType}`}</h3>
                       <p>
-                        Latest model output summary for selected administrative area.
+                        {currentReport
+                          ? `Generated ${formatTimestamp(currentReport.createdAt)}`
+                          : 'Latest model output summary for selected administrative area.'}
                       </p>
                     </div>
                     <div className="report-preview-grid">
-                      <PreviewItem label="Risk zones" value={formatNumber(mappedZones)} />
+                      <PreviewItem
+                        label="Risk zones"
+                        value={formatNumber(
+                          currentReport?.summary?.risk_zones ?? mappedZones,
+                        )}
+                      />
                       <PreviewItem
                         label="Highest probability"
-                        value={`${Math.round(latestProbability * 100)}%`}
+                        value={`${Math.round(
+                          (currentReport?.summary?.highest_probability ??
+                            latestProbability) * 100,
+                        )}%`}
                       />
                       <PreviewItem
                         label="Affected people"
-                        value={formatNumber(lossSummary.people)}
+                        value={formatNumber(
+                          currentReport?.summary?.affected_people ??
+                            lossSummary.people,
+                        )}
                       />
                       <PreviewItem
                         label="Economic loss"
-                        value={formatPeso(lossSummary.economicLoss)}
+                        value={formatCompactPeso(
+                          currentReport?.summary?.economic_loss_php ??
+                            lossSummary.economicLoss,
+                        )}
                       />
                     </div>
                     <div className="report-recommendation">
@@ -561,6 +981,10 @@ function ReportsPage() {
                       ))}
                     </div>
                   </div>
+                  <div className="report-recommendation mt-4">
+                    <strong>{decisionRecommendation.level}</strong>
+                    <span>{decisionRecommendation.text}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -582,26 +1006,67 @@ function ReportsPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {reportRows.map((row) => (
-                        <tr key={`${row.name}-${row.type}`}>
+                      {pagedGeneratedReports.map((row) => (
+                        <tr key={row.id}>
                           <td>{row.name}</td>
-                          <td>{row.area}</td>
-                          <td>{row.type}</td>
+                          <td>{row.municipality}</td>
+                          <td>{row.reportType}</td>
                           <td>
                             <span className="badge bg-primary-subtle text-primary text-capitalize">
                               {row.status}
                             </span>
                           </td>
                           <td className="text-end">
-                            <button type="button" className="btn btn-sm btn-light">
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-light"
+                              onClick={() => {
+                                setCurrentReport(row)
+                                printReportDocument(row)
+                              }}
+                            >
                               View
                             </button>
                           </td>
                         </tr>
                       ))}
+                      {generatedReports.length === 0 && (
+                        <tr>
+                          <td colSpan="5" className="text-center text-secondary py-4">
+                            No generated reports yet.
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
+                {generatedReports.length > GENERATED_REPORTS_PER_PAGE && (
+                  <div className="alert-pagination reports-pagination px-4 pb-4">
+                    <button
+                      type="button"
+                      className="btn btn-light btn-sm"
+                      disabled={reportsPage === 1}
+                      onClick={() => setReportsPage((page) => Math.max(1, page - 1))}
+                    >
+                      <i className="ti ti-chevron-left"></i>
+                      Previous
+                    </button>
+                    <span>
+                      Page {reportsPage} of {totalReportPages}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-light btn-sm"
+                      disabled={reportsPage === totalReportPages}
+                      onClick={() =>
+                        setReportsPage((page) => Math.min(totalReportPages, page + 1))
+                      }
+                    >
+                      Next
+                      <i className="ti ti-chevron-right"></i>
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -632,7 +1097,7 @@ function ReportsPage() {
 
 function ReportMetric({ icon, label, value, note, tone = 'primary' }) {
   return (
-    <div className={`card p-4 border rounded-2 h-100 bg-${tone} bg-opacity-10 border-${tone} border-opacity-25`}>
+    <div className={`card report-metric-card p-4 border rounded-2 h-100 bg-${tone} bg-opacity-10 border-${tone} border-opacity-25`}>
       <div className="d-flex gap-3">
         <div className={`icon-shape icon-md bg-${tone} text-white rounded-2`}>
           <i className={`ti ${icon} fs-4`}></i>

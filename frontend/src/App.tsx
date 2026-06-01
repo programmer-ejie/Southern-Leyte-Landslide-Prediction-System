@@ -15,6 +15,7 @@ const SETTINGS_PATH = '/admin/settings'
 const HOME_PATH = '/'
 const LOGOUT_PATH = '/logout'
 const LANDING_TEMPLATE_PATH = '/nexusai-1.0.0/index.html'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 const AUTH_USER_KEY = 'sl-lps-auth-user'
 const AUTH_TOKEN_KEY = 'sl-lps-auth-token'
 const ADMIN_PATHS = [
@@ -84,9 +85,11 @@ function resolvePath(pathName: string) {
 }
 
 function LandingPage() {
+  const landingUrl = `${LANDING_TEMPLATE_PATH}?apiBaseUrl=${encodeURIComponent(API_BASE_URL)}`
+
   return (
     <iframe
-      src={LANDING_TEMPLATE_PATH}
+      src={landingUrl}
       title="Southern Leyte Landslide Prediction landing page"
       style={{
         border: 0,

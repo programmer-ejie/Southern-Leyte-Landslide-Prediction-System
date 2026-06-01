@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
-
-const API_BASE_URL = 'http://127.0.0.1:8000'
+import { API_BASE_URL } from './theme-settings'
 
 const riskLabelByLevel = {
   '15%': 'Low',
@@ -58,35 +57,48 @@ function buildAlerts(riskZones) {
     .sort((alertA, alertB) => alertB.priority - alertA.priority)
 }
 
-function AdminAlertDropdown({ riskZones }) {
+function buildAlertsFromPayload(alertPayload) {
+  return [...(alertPayload?.alerts ?? [])]
+    .map((alert) => ({
+      id: alert.id,
+      name: alert.name,
+      riskLevel: alert.riskLevel,
+      probability: alert.probability ?? 0,
+      severity: alert.severity,
+      priority: alert.priority ?? 0,
+    }))
+    .sort((alertA, alertB) => alertB.priority - alertA.priority)
+}
+
+function AdminAlertDropdown({ alertsPayload, riskZones }) {
   const dropdownRef = useRef(null)
   const [isOpen, setIsOpen] = useState(false)
-  const [fallbackRiskZones, setFallbackRiskZones] = useState(null)
+  const [fallbackAlertsPayload, setFallbackAlertsPayload] = useState(null)
 
   useEffect(() => {
-    if (riskZones) {
+    if (alertsPayload || riskZones) {
       return undefined
     }
 
     let isMounted = true
 
     axios
-      .get(`${API_BASE_URL}/risk-zones`)
+      .get(`${API_BASE_URL}/alerts`)
       .then((response) => {
         if (isMounted) {
-          setFallbackRiskZones(response.data)
+          setFallbackAlertsPayload(response.data)
         }
       })
       .catch(() => {
         if (isMounted) {
-          setFallbackRiskZones({ features: [] })
+          setFallbackAlertsPayload({ alerts: [] })
         }
       })
 
     return () => {
       isMounted = false
     }
-  }, [riskZones])
+  }, [alertsPayload, riskZones])
 
   useEffect(() => {
     function handleOutsideClick(event) {
@@ -105,10 +117,13 @@ function AdminAlertDropdown({ riskZones }) {
     }
   }, [])
 
-  const alerts = useMemo(
-    () => buildAlerts(riskZones ?? fallbackRiskZones),
-    [fallbackRiskZones, riskZones],
-  )
+  const alerts = useMemo(() => {
+    if (alertsPayload || fallbackAlertsPayload) {
+      return buildAlertsFromPayload(alertsPayload ?? fallbackAlertsPayload)
+    }
+
+    return buildAlerts(riskZones)
+  }, [alertsPayload, fallbackAlertsPayload, riskZones])
   const previewAlerts = alerts.slice(0, 5)
 
   return (
@@ -118,9 +133,9 @@ function AdminAlertDropdown({ riskZones }) {
         className="position-relative btn-icon btn-sm btn-light btn rounded-circle"
         onClick={() => setIsOpen((currentState) => !currentState)}
         aria-expanded={isOpen}
-        aria-label="Alerts"
+        aria-label="Alert zones"
       >
-        <i className="ti ti-bell fs-5"></i>
+        <i className="ti ti-map-pin-exclamation fs-5"></i>
         <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger mt-2 ms-n2">
           {alerts.length}
         </span>
@@ -130,7 +145,7 @@ function AdminAlertDropdown({ riskZones }) {
         <div className="alerts-dropdown shadow-lg">
           <div className="alerts-dropdown-header">
             <div>
-              <strong>Latest Alerts</strong>
+              <strong>Alert Zones</strong>
               <span>Top priority risk zones</span>
             </div>
             <span>{alerts.length}</span>
@@ -147,7 +162,7 @@ function AdminAlertDropdown({ riskZones }) {
                 <span>
                   <strong>{alert.name}</strong>
                   <small>
-                    {alert.severity} · {Math.round(alert.probability * 100)}%
+                    {alert.severity} - {Math.round(alert.probability * 100)}%
                     probability
                   </small>
                 </span>
@@ -161,7 +176,7 @@ function AdminAlertDropdown({ riskZones }) {
           </div>
 
           <a className="alerts-dropdown-action" href="/admin/alerts">
-            See all alerts
+            See all alert zones
             <i className="ti ti-arrow-right"></i>
           </a>
         </div>

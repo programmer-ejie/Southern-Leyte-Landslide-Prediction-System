@@ -1,5 +1,10 @@
 .env
 .env.*
+!.env.example
+!backend/.env.example
+!backend/.env.production.example
+!frontend/.env.example
+!frontend/.env.production.example
 
 venv/
 .venv/
@@ -10,7 +15,35 @@ __pycache__/
 *.py[cod]
 
 training_docs/
-data/
+
+# Keep large source/training data out of Git, but allow the small runtime
+# subset required by the deployed FastAPI service.
+data/*
+!data/raw/
+data/raw/*
+!data/raw/southern_leyte/
+data/raw/southern_leyte/*
+!data/raw/southern_leyte/boundary/
+!data/raw/southern_leyte/boundary/**
+!data/raw/southern_leyte/exposure/
+!data/raw/southern_leyte/exposure/**
+!data/processed/
+data/processed/*
+!data/processed/southern_leyte/
+data/processed/southern_leyte/*
+!data/processed/southern_leyte/loss_estimation/
+!data/processed/southern_leyte/loss_estimation/**
+!data/processed/southern_leyte/tensors/
+data/processed/southern_leyte/tensors/*
+!data/processed/southern_leyte/tensors/southern_leyte_demo_001.h5
+!data/processed/southern_leyte/masks/
+data/processed/southern_leyte/masks/*
+!data/processed/southern_leyte/masks/southern_leyte_osm_manual_noah_5level_target.h5
+!data/metadata/
+data/metadata/*
+!data/metadata/southern_leyte/
+data/metadata/southern_leyte/*
+!data/metadata/southern_leyte/tile_bounds.csv
 backend/.venv/
 backend/.venv-*/
 uvicorn.err.log

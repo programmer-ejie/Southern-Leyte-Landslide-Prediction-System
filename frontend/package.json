@@ -12,6 +12,7 @@
   "dependencies": {
     "@popperjs/core": "^2.11.8",
     "@tabler/icons-webfont": "^3.35.0",
+    "apexcharts": "^5.3.6",
     "axios": "^1.16.1",
     "bootstrap": "^5.3.8",
     "leaflet": "^1.9.4",

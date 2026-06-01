@@ -1,0 +1,2 @@
+tile_id,input_file,min_lon,min_lat,max_lon,max_lat,crs,width,height,channels,notes
+southern_leyte_demo_001,data/processed/southern_leyte/tensors/southern_leyte_demo_001.h5,124.62,9.88,125.35,10.55,EPSG:4326,128,128,14,province-level demo bounds

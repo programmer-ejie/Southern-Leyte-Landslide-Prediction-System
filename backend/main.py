@@ -35,6 +35,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+load_dotenv(Path(__file__).with_name(".env"))
+
 MUNICIPALITY_BOUNDARY_PATH = (
     PROJECT_ROOT
     / "data"
@@ -70,13 +72,18 @@ from model.inference import (
     run_sample_inference,
 )
 
-load_dotenv(Path(__file__).with_name(".env"))
-
 app = FastAPI(title="Landslide Prediction API")
+
+DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -161,14 +168,11 @@ class SystemSettingsRequest(BaseModel):
     map_interaction: str | None = None
 
 
-ADMIN_USER = {
-    "email": "jtagud@southernleytestateu.edu.ph",
-    "password": "jtagud@2026",
-    "first_name": "Jorton",
-    "middle_name": None,
-    "last_name": "tagud",
-    "role": "admin",
-}
+class GenerateReportRequest(BaseModel):
+    municipality: str = "Southern Leyte"
+    report_type: str = "Risk Summary"
+    format: str = "PDF"
+
 
 DEFAULT_SYSTEM_SETTINGS = {
     "theme_mode": "light",
@@ -179,6 +183,53 @@ DEFAULT_SYSTEM_SETTINGS = {
     "default_duration": 6,
     "map_interaction": "Locked by default",
 }
+
+
+def bootstrap_admin_user():
+    email = os.getenv("BOOTSTRAP_ADMIN_EMAIL")
+    password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
+
+    if not email or not password:
+        return
+
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(password, salt)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO users (
+                    email,
+                    password_hash,
+                    salt,
+                    first_name,
+                    middle_name,
+                    last_name,
+                    role
+                )
+                VALUES (
+                    :email,
+                    :password_hash,
+                    :salt,
+                    :first_name,
+                    :middle_name,
+                    :last_name,
+                    :role
+                )
+                ON CONFLICT (email) DO NOTHING;
+                """
+            ),
+            {
+                "email": email.strip().lower(),
+                "password_hash": password_hash,
+                "salt": salt,
+                "first_name": os.getenv("BOOTSTRAP_ADMIN_FIRST_NAME", "Admin"),
+                "middle_name": os.getenv("BOOTSTRAP_ADMIN_MIDDLE_NAME") or None,
+                "last_name": os.getenv("BOOTSTRAP_ADMIN_LAST_NAME", "User"),
+                "role": os.getenv("BOOTSTRAP_ADMIN_ROLE", "admin"),
+            },
+        )
 
 
 def hash_password(password: str, salt: str) -> str:
@@ -235,9 +286,6 @@ def create_access_token(user: dict) -> str:
 
 @app.on_event("startup")
 def prepare_auth_users():
-    salt = secrets.token_hex(16)
-    password_hash = hash_password(ADMIN_USER["password"], salt)
-
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -257,46 +305,12 @@ def prepare_auth_users():
                 """
             )
         )
-        conn.execute(
-            text(
-                """
-                INSERT INTO users (
-                    email,
-                    password_hash,
-                    salt,
-                    first_name,
-                    middle_name,
-                    last_name,
-                    role
-                )
-                VALUES (
-                    :email,
-                    :password_hash,
-                    :salt,
-                    :first_name,
-                    :middle_name,
-                    :last_name,
-                    :role
-                )
-                ON CONFLICT (email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
-                    salt = EXCLUDED.salt,
-                    first_name = EXCLUDED.first_name,
-                    middle_name = EXCLUDED.middle_name,
-                    last_name = EXCLUDED.last_name,
-                    role = EXCLUDED.role,
-                    updated_at = NOW();
-                """
-            ),
-            {
-                **ADMIN_USER,
-                "password_hash": password_hash,
-                "salt": salt,
-            },
-        )
 
+    bootstrap_admin_user()
     ensure_rainfall_simulation_logs_table()
     ensure_system_settings_table()
+    ensure_alerts_table()
+    ensure_generated_reports_table()
 
 
 @app.get("/")
@@ -1539,6 +1553,785 @@ def clip_geometry_to_southern_leyte(geometry):
     return mapping(clipped)
 
 
+def risk_label_for_level(risk_level):
+    return {
+        "15%": "Low",
+        "30%": "Slightly Low",
+        "50%": "Moderate",
+        "75%": "High",
+        "100%": "Very High",
+        "Low": "Low",
+        "Medium": "Moderate",
+        "High": "High",
+    }.get(risk_level, risk_level)
+
+
+def alert_severity(risk_level, probability):
+    label = risk_label_for_level(risk_level)
+    probability_value = float(probability or 0)
+
+    if label == "Very High" or probability_value >= 0.85:
+        return "Critical"
+
+    if label == "High" or probability_value >= 0.7:
+        return "High"
+
+    if label == "Moderate" or probability_value >= 0.45:
+        return "Monitoring"
+
+    return "Watch"
+
+
+def alert_priority(probability, loss_estimate):
+    probability_value = float(probability or 0)
+    affected_people = loss_estimate.get("estimated_affected_people", 0)
+    exposure_score = min(float(affected_people or 0) / 150000, 1)
+    return round((probability_value * 0.72 + exposure_score * 0.28) * 100)
+
+
+def automatic_alert_status(severity, priority):
+    if severity in {"Critical", "High"} or priority >= 70:
+        return "Immediate Response"
+
+    if severity == "Monitoring" or priority >= 45:
+        return "Monitoring"
+
+    return "Watch"
+
+
+def alert_source_metadata(name):
+    alert_name = str(name or "")
+
+    if alert_name.startswith("Live Rainfall Prediction"):
+        return {
+            "data_source": "Model + live rainfall",
+            "model_name": MODEL_NAME,
+            "source_detail": "Attention U-Net prediction adjusted with live rainfall forecast data.",
+        }
+
+    if alert_name.startswith("Rainfall Simulation"):
+        return {
+            "data_source": "Model + rainfall scenario",
+            "model_name": MODEL_NAME,
+            "source_detail": "Attention U-Net prediction adjusted with the selected rainfall scenario.",
+        }
+
+    if alert_name.startswith("Baseline Hazard"):
+        return {
+            "data_source": "Baseline hazard layer",
+            "model_name": "Curated 5-level baseline hazard",
+            "source_detail": "Curated 5-level Southern Leyte hazard mask.",
+        }
+
+    return {
+        "data_source": "Model prediction",
+        "model_name": MODEL_NAME,
+        "source_detail": f"{MODEL_NAME} using the latest saved prediction layer.",
+    }
+
+
+def ensure_alerts_table():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id SERIAL PRIMARY KEY,
+                    risk_zone_id INTEGER UNIQUE,
+                    name TEXT NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    risk_label TEXT NOT NULL,
+                    probability DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    severity TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'Watch',
+                    loss_estimate JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    location_summary TEXT,
+                    municipalities JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    barangays JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    classification_basis TEXT,
+                    resolved_at TIMESTAMPTZ NULL
+                );
+                """
+            )
+        )
+        conn.execute(text("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS location_summary TEXT;"))
+        conn.execute(
+            text(
+                "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS municipalities JSONB NOT NULL DEFAULT '[]'::jsonb;"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS barangays JSONB NOT NULL DEFAULT '[]'::jsonb;"
+            )
+        )
+        conn.execute(text("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS classification_basis TEXT;"))
+
+
+def risk_zones_table_exists():
+    with engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text("SELECT to_regclass('public.risk_zones') IS NOT NULL;")
+            ).scalar()
+        )
+
+
+def summarize_alert_locations(risk_geometry, loss_estimate):
+    if shapely_shape is None or shapely_make_valid is None or not risk_geometry:
+        return {
+            "location_summary": "Southern Leyte risk zone",
+            "municipalities": [],
+            "barangays": [],
+        }
+
+    try:
+        risk_shape = shapely_make_valid(shapely_shape(risk_geometry))
+    except Exception:
+        return {
+            "location_summary": "Southern Leyte risk zone",
+            "municipalities": [],
+            "barangays": [],
+        }
+
+    if risk_shape.is_empty:
+        return {
+            "location_summary": "Southern Leyte risk zone",
+            "municipalities": [],
+            "barangays": [],
+        }
+
+    impacted_barangays = []
+    total_overlap_area = 0.0
+
+    for barangay_features in load_southern_leyte_barangay_boundaries().values():
+        for feature in barangay_features:
+            geometry = feature.get("geometry")
+            properties = feature.get("properties", {})
+
+            if not geometry:
+                continue
+
+            try:
+                barangay_shape = shapely_make_valid(shapely_shape(geometry))
+                if not risk_shape.intersects(barangay_shape):
+                    continue
+
+                overlap = risk_shape.intersection(barangay_shape)
+            except Exception:
+                continue
+
+            if overlap.is_empty:
+                continue
+
+            overlap_area = float(overlap.area or 0)
+            barangay_area = float(barangay_shape.area or 0)
+
+            if overlap_area <= 0 or barangay_area <= 0:
+                continue
+
+            coverage_percent = min(overlap_area / barangay_area * 100.0, 100.0)
+            if coverage_percent < 0.1:
+                continue
+
+            total_overlap_area += overlap_area
+            impacted_barangays.append(
+                {
+                    "municipality": properties.get("municipality"),
+                    "barangay": properties.get("name"),
+                    "coverage_percent": round(coverage_percent, 1),
+                    "population": properties.get("population"),
+                    "_overlap_area": overlap_area,
+                }
+            )
+
+    impacted_barangays.sort(
+        key=lambda item: (item["_overlap_area"], item.get("coverage_percent", 0)),
+        reverse=True,
+    )
+
+    total_affected_people = float(loss_estimate.get("estimated_affected_people") or 0)
+    total_economic_loss = float(loss_estimate.get("estimated_economic_loss_php") or 0)
+    total_possible_casualties = float(
+        loss_estimate.get("estimated_possible_casualties") or 0
+    )
+
+    for item in impacted_barangays:
+        fraction = item["_overlap_area"] / total_overlap_area if total_overlap_area else 0
+        item["estimated_affected_people"] = round(total_affected_people * fraction)
+        item["estimated_economic_loss_php"] = round(total_economic_loss * fraction)
+        item["estimated_possible_casualties"] = round(
+            total_possible_casualties * fraction,
+            1,
+        )
+        del item["_overlap_area"]
+
+    municipality_counts = {}
+    for item in impacted_barangays:
+        municipality = item.get("municipality")
+        if not municipality:
+            continue
+        municipality_counts[municipality] = municipality_counts.get(municipality, 0) + 1
+
+    municipalities = [
+        {"name": name, "barangay_count": count}
+        for name, count in sorted(
+            municipality_counts.items(),
+            key=lambda entry: entry[1],
+            reverse=True,
+        )
+    ]
+
+    top_barangays = impacted_barangays[:10]
+    if municipalities:
+        location_summary = ", ".join(item["name"] for item in municipalities[:3])
+        if len(municipalities) > 3:
+            location_summary = f"{location_summary} + {len(municipalities) - 3} more"
+    else:
+        location_summary = "Southern Leyte risk zone"
+
+    return {
+        "location_summary": location_summary,
+        "municipalities": municipalities,
+        "barangays": top_barangays,
+    }
+
+
+def sync_alerts_from_risk_zones():
+    ensure_alerts_table()
+
+    if not risk_zones_table_exists():
+        return
+
+    query = text(
+        """
+        SELECT
+            id,
+            name,
+            risk_level,
+            probability,
+            ST_Area(geom::geography) / 1000000.0 AS area_sq_km
+            ,
+            ST_AsGeoJSON(geom)::json AS geometry
+        FROM risk_zones;
+        """
+    )
+
+    upsert_query = text(
+        """
+        INSERT INTO alerts (
+            risk_zone_id,
+            name,
+            risk_level,
+            risk_label,
+            probability,
+            severity,
+            priority,
+            loss_estimate,
+            location_summary,
+            municipalities,
+            barangays,
+            status,
+            classification_basis,
+            updated_at
+        )
+        VALUES (
+            :risk_zone_id,
+            :name,
+            :risk_level,
+            :risk_label,
+            :probability,
+            :severity,
+            :priority,
+            CAST(:loss_estimate AS JSONB),
+            :location_summary,
+            CAST(:municipalities AS JSONB),
+            CAST(:barangays AS JSONB),
+            :status,
+            :classification_basis,
+            NOW()
+        )
+        ON CONFLICT (risk_zone_id) DO UPDATE SET
+            name = EXCLUDED.name,
+            risk_level = EXCLUDED.risk_level,
+            risk_label = EXCLUDED.risk_label,
+            probability = EXCLUDED.probability,
+            severity = EXCLUDED.severity,
+            priority = EXCLUDED.priority,
+            loss_estimate = EXCLUDED.loss_estimate,
+            location_summary = EXCLUDED.location_summary,
+            municipalities = EXCLUDED.municipalities,
+            barangays = EXCLUDED.barangays,
+            status = EXCLUDED.status,
+            classification_basis = EXCLUDED.classification_basis,
+            resolved_at = NULL,
+            updated_at = NOW();
+        """
+    )
+
+    with engine.begin() as conn:
+        rows = conn.execute(query).mappings().all()
+        risk_zone_ids = [row["id"] for row in rows]
+
+        if risk_zone_ids:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM alerts
+                    WHERE risk_zone_id IS NULL
+                       OR risk_zone_id <> ALL(:risk_zone_ids);
+                    """
+                ),
+                {"risk_zone_ids": risk_zone_ids},
+            )
+        else:
+            conn.execute(text("DELETE FROM alerts;"))
+
+        for row in rows:
+            probability = float(row["probability"] or 0)
+            risk_level = row["risk_level"]
+            loss_estimate = estimate_loss(
+                probability,
+                risk_level,
+                float(row["area_sq_km"] or 0),
+            )
+            geometry = row["geometry"] if isinstance(row["geometry"], dict) else json.loads(row["geometry"])
+            locations = summarize_alert_locations(geometry, loss_estimate)
+            severity = alert_severity(risk_level, probability)
+            priority = alert_priority(probability, loss_estimate)
+            status = automatic_alert_status(severity, priority)
+            conn.execute(
+                upsert_query,
+                {
+                    "risk_zone_id": row["id"],
+                    "name": row["name"],
+                    "risk_level": risk_level,
+                    "risk_label": risk_label_for_level(risk_level),
+                    "probability": probability,
+                    "severity": severity,
+                    "priority": priority,
+                    "loss_estimate": json.dumps(loss_estimate),
+                    "location_summary": locations["location_summary"],
+                    "municipalities": json.dumps(locations["municipalities"]),
+                    "barangays": json.dumps(locations["barangays"]),
+                    "status": status,
+                    "classification_basis": (
+                        f"Automatically classified from severity {severity}, "
+                        f"priority score {priority}, probability {round(probability * 100)}%, "
+                        f"and estimated exposure."
+                    ),
+                },
+            )
+
+
+def serialize_alert(row):
+    loss_estimate = row["loss_estimate"] or {}
+    if isinstance(loss_estimate, str):
+        loss_estimate = json.loads(loss_estimate)
+    municipalities = row["municipalities"] or []
+    barangays = row["barangays"] or []
+    if isinstance(municipalities, str):
+        municipalities = json.loads(municipalities)
+    if isinstance(barangays, str):
+        barangays = json.loads(barangays)
+
+    return {
+        "id": row["id"],
+        "riskZoneId": row["risk_zone_id"],
+        "name": row["name"],
+        "riskLevel": row["risk_label"],
+        "rawRiskLevel": row["risk_level"],
+        "probability": float(row["probability"] or 0),
+        "severity": row["severity"],
+        "priority": row["priority"],
+        "status": row["status"],
+        "classificationBasis": row["classification_basis"],
+        "loss": loss_estimate,
+        "locationSummary": row["location_summary"],
+        "municipalities": municipalities,
+        "barangays": barangays,
+        "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
+        "updatedAt": row["updated_at"].isoformat() if row["updated_at"] else None,
+        "resolvedAt": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+        "feedTimestamp": row["updated_at"].isoformat() if row["updated_at"] else None,
+        **alert_source_metadata(row["name"]),
+    }
+
+
+@app.get("/alerts")
+def alerts(limit: int = 100):
+    sync_alerts_from_risk_zones()
+
+    query = text(
+        """
+        SELECT *
+        FROM alerts
+        ORDER BY
+            CASE status
+                WHEN 'Immediate Response' THEN 1
+                WHEN 'Monitoring' THEN 2
+                WHEN 'Watch' THEN 3
+                ELSE 4
+            END,
+            priority DESC,
+            updated_at DESC,
+            id DESC
+        LIMIT :limit;
+        """
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(query, {"limit": max(min(limit, 250), 1)}).mappings().all()
+
+    return {"alerts": [serialize_alert(row) for row in rows]}
+
+
+def ensure_generated_reports_table():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS generated_reports (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    municipality TEXT NOT NULL,
+                    report_type TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Generated',
+                    summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+        )
+
+
+def report_alerts_for_municipality(municipality):
+    all_alerts = alerts(limit=250)["alerts"]
+    normalized_municipality = _normalize_place_name(municipality)
+
+    if normalized_municipality in {"", "southern leyte", "all municipalities"}:
+        return all_alerts
+
+    return [
+        alert
+        for alert in all_alerts
+        if any(
+            _normalize_place_name(item.get("name")) == normalized_municipality
+            for item in alert.get("municipalities", [])
+        )
+    ]
+
+
+def build_generated_report_payload(request: GenerateReportRequest):
+    selected_alerts = report_alerts_for_municipality(request.municipality)
+    generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    normalized_report_type = request.report_type.strip().lower()
+
+    summary = {
+        "risk_zones": len(selected_alerts),
+        "high_risk_zones": sum(
+            1
+            for alert in selected_alerts
+            if alert.get("rawRiskLevel") in {"75%", "100%", "High"}
+            or alert.get("severity") in {"High", "Critical"}
+        ),
+        "affected_people": round(
+            sum(alert.get("loss", {}).get("estimated_affected_people", 0) for alert in selected_alerts)
+        ),
+        "economic_loss_php": round(
+            sum(alert.get("loss", {}).get("estimated_economic_loss_php", 0) for alert in selected_alerts)
+        ),
+        "possible_casualties": round(
+            sum(alert.get("loss", {}).get("estimated_possible_casualties", 0) for alert in selected_alerts),
+            1,
+        ),
+        "highest_probability": max(
+            [alert.get("probability", 0) for alert in selected_alerts] or [0]
+        ),
+    }
+
+    distribution = {}
+    top_barangays = {}
+    for alert in selected_alerts:
+        label = alert.get("riskLevel") or alert.get("severity") or "Unknown"
+        distribution[label] = distribution.get(label, 0) + 1
+
+        for barangay in alert.get("barangays", []):
+            if (
+                _normalize_place_name(request.municipality)
+                not in {"", "southern leyte", "all municipalities"}
+                and _normalize_place_name(barangay.get("municipality"))
+                != _normalize_place_name(request.municipality)
+            ):
+                continue
+
+            key = (
+                barangay.get("municipality") or "",
+                barangay.get("barangay") or "",
+            )
+            current = top_barangays.setdefault(
+                key,
+                {
+                    "municipality": barangay.get("municipality"),
+                    "barangay": barangay.get("barangay"),
+                    "estimated_affected_people": 0,
+                    "estimated_economic_loss_php": 0,
+                    "estimated_possible_casualties": 0,
+                    "max_coverage_percent": 0,
+                },
+            )
+            current["estimated_affected_people"] += barangay.get(
+                "estimated_affected_people",
+                0,
+            )
+            current["estimated_economic_loss_php"] += barangay.get(
+                "estimated_economic_loss_php",
+                0,
+            )
+            current["estimated_possible_casualties"] += barangay.get(
+                "estimated_possible_casualties",
+                0,
+            )
+            current["max_coverage_percent"] = max(
+                current["max_coverage_percent"],
+                barangay.get("coverage_percent", 0),
+            )
+
+    top_barangay_rows = sorted(
+        top_barangays.values(),
+        key=lambda item: item["estimated_affected_people"],
+        reverse=True,
+    )[:12]
+
+    if normalized_report_type == "loss estimate":
+        focus_title = "Loss Estimate Register"
+        focus_columns = [
+            "Alert",
+            "Location",
+            "Risk",
+            "Affected People",
+            "Economic Loss",
+            "Possible Casualties",
+        ]
+        focus_rows = [
+            {
+                "Alert": alert.get("name"),
+                "Location": alert.get("locationSummary"),
+                "Risk": alert.get("riskLevel"),
+                "Affected People": alert.get("loss", {}).get("estimated_affected_people", 0),
+                "Economic Loss": alert.get("loss", {}).get("estimated_economic_loss_php", 0),
+                "Possible Casualties": alert.get("loss", {}).get("estimated_possible_casualties", 0),
+            }
+            for alert in selected_alerts
+        ]
+        recommendation = (
+            "Use this loss register to prioritize resource allocation, evacuation logistics, and damage assessment planning."
+        )
+    elif normalized_report_type == "rainfall simulation":
+        logs = rainfall_simulation_logs(limit=12).get("logs", [])
+        focus_title = "Rainfall Simulation Log"
+        focus_columns = [
+            "Timestamp",
+            "Rainfall Rate",
+            "Duration",
+            "Saturation",
+            "Risk Level",
+            "Hotspot",
+        ]
+        focus_rows = [
+            {
+                "Timestamp": log.get("timestamp") or log.get("created_at"),
+                "Rainfall Rate": log.get("rainfall_rate"),
+                "Duration": log.get("duration_hours"),
+                "Saturation": log.get("saturation_factor"),
+                "Risk Level": log.get("risk_level"),
+                "Hotspot": log.get("hotspot"),
+            }
+            for log in logs
+        ]
+        recommendation = (
+            "Compare simulated rainfall runs with current alerts and inspect hotspots where rainfall pressure increases mapped risk."
+        )
+    elif normalized_report_type == "barangay exposure":
+        exposure_rows = top_barangay_rows
+        if not exposure_rows:
+            exposure_rows = [
+                {
+                    "barangay": "No high-overlap barangay rows",
+                    "municipality": request.municipality,
+                    "max_coverage_percent": 0,
+                    "estimated_affected_people": summary["affected_people"],
+                    "estimated_economic_loss_php": summary["economic_loss_php"],
+                    "estimated_possible_casualties": summary["possible_casualties"],
+                }
+            ]
+        focus_title = "Barangay Exposure Register"
+        focus_columns = [
+            "Barangay",
+            "Municipality",
+            "Coverage",
+            "Affected People",
+            "Economic Loss",
+            "Possible Casualties",
+        ]
+        focus_rows = [
+            {
+                "Barangay": row.get("barangay"),
+                "Municipality": row.get("municipality"),
+                "Coverage": row.get("max_coverage_percent"),
+                "Affected People": row.get("estimated_affected_people"),
+                "Economic Loss": row.get("estimated_economic_loss_php"),
+                "Possible Casualties": row.get("estimated_possible_casualties"),
+            }
+            for row in exposure_rows
+        ]
+        recommendation = (
+            "Coordinate first with barangays showing the highest exposure, then validate household-level impacts with local officials."
+        )
+    else:
+        focus_title = "Risk Distribution"
+        focus_columns = ["Risk Level", "Zones"]
+        focus_rows = [
+            {"Risk Level": label, "Zones": count}
+            for label, count in sorted(distribution.items())
+        ]
+        recommendation = (
+            "Prioritize Immediate Response and High risk zones, validate exposed barangays with LGU field teams, and prepare advisories where needed."
+        )
+
+    return {
+        "name": f"{request.municipality} {request.report_type}",
+        "municipality": request.municipality,
+        "report_type": request.report_type,
+        "format": request.format,
+        "generated_at": generated_at,
+        "summary": summary,
+        "risk_distribution": [
+            {"label": label, "count": count}
+            for label, count in sorted(distribution.items())
+        ],
+        "focus_title": focus_title,
+        "focus_columns": focus_columns,
+        "focus_rows": focus_rows,
+        "alerts": selected_alerts,
+        "top_barangays": top_barangay_rows,
+        "recommendation": recommendation,
+        "data_sources": {
+            "risk_zones": "PostGIS risk_zones table",
+            "alerts": "Database-backed generated alerts",
+            "loss_estimates": "Barangay population, OSM asset exposure, vulnerability rates, and mapped risk area",
+        },
+    }
+
+
+def serialize_generated_report(row):
+    summary = row["summary"] or {}
+    payload = row["payload"] or {}
+
+    if isinstance(summary, str):
+        summary = json.loads(summary)
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "municipality": row["municipality"],
+        "reportType": row["report_type"],
+        "format": row["format"],
+        "status": row["status"],
+        "summary": summary,
+        "payload": payload,
+        "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@app.post("/reports")
+def generate_report(request: GenerateReportRequest):
+    ensure_generated_reports_table()
+    payload = build_generated_report_payload(request)
+
+    query = text(
+        """
+        INSERT INTO generated_reports (
+            name,
+            municipality,
+            report_type,
+            format,
+            status,
+            summary,
+            payload
+        )
+        VALUES (
+            :name,
+            :municipality,
+            :report_type,
+            :format,
+            'Generated',
+            CAST(:summary AS JSONB),
+            CAST(:payload AS JSONB)
+        )
+        RETURNING *;
+        """
+    )
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            query,
+            {
+                "name": payload["name"],
+                "municipality": request.municipality,
+                "report_type": request.report_type,
+                "format": request.format,
+                "summary": json.dumps(payload["summary"]),
+                "payload": json.dumps(payload),
+            },
+        ).mappings().one()
+
+    return {"report": serialize_generated_report(row)}
+
+
+@app.get("/reports")
+def generated_reports(limit: int = 25):
+    ensure_generated_reports_table()
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT *
+                FROM generated_reports
+                ORDER BY created_at DESC, id DESC
+                LIMIT :limit;
+                """
+            ),
+            {"limit": max(min(limit, 100), 1)},
+        ).mappings().all()
+
+    return {"reports": [serialize_generated_report(row) for row in rows]}
+
+
+@app.get("/reports/{report_id}")
+def generated_report(report_id: int):
+    ensure_generated_reports_table()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT * FROM generated_reports WHERE id = :report_id;"),
+            {"report_id": report_id},
+        ).mappings().first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+
+    return {"report": serialize_generated_report(row)}
+
+
 @app.get("/risk-zones")
 def risk_zones():
     query = text(
@@ -1634,10 +2427,13 @@ def replace_risk_zones(predictions):
 
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM risk_zones;"))
-        return [
+        rows = [
             conn.execute(query, prediction).mappings().one()
             for prediction in predictions
         ]
+
+    calculate_barangay_risk_breakdown_from_json.cache_clear()
+    return rows
 
 
 def predictions_to_feature_collection(predictions):

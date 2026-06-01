@@ -183,16 +183,16 @@ function getActiveLayerInfo(riskZones, latestRunMetadata) {
 
 function RiskBreakdownList({ breakdown }) {
   if (breakdown === null) {
-    return <span>Loading barangay risk share...</span>
+    return <span>Loading barangay area share...</span>
   }
 
   if (!breakdown?.length) {
-    return <span>Risk breakdown: No barangay overlap data</span>
+    return <span>Area breakdown: No barangay overlap data</span>
   }
 
   return (
     <span className="prediction-popup-breakdown">
-      <span className="prediction-popup-breakdown-title">Barangay risk share</span>
+      <span className="prediction-popup-breakdown-title">Barangay area by risk class</span>
       {breakdown.map((item) => (
         <span
           className="prediction-popup-breakdown-row"
@@ -230,7 +230,7 @@ function BarangayInfoPanel({
           <h4>Select a barangay</h4>
           <p>
             Choose a barangay from the dropdown or click a colored area on the map
-            to view population, risk share, and exposure estimates.
+            to view population, area share, and exposure estimates.
           </p>
         </div>
         <RiskLegend variant="panel" />
@@ -659,7 +659,6 @@ function PredictionPage() {
   const activeLayerInfo = getActiveLayerInfo(riskZones, latestRunMetadata)
   const shouldShowBaselineOverlay =
     hasBaselineRiskLayer ||
-    activeLayerInfo.tone === 'model' ||
     activeLayerInfo.tone === 'live' ||
     activeLayerInfo.tone === 'scenario'
   const riskLayerVersion =
@@ -922,7 +921,7 @@ function PredictionPage() {
         setSelectedBarangayRiskBreakdown(response.data?.risk_breakdown ?? []),
       )
       .catch(() => setSelectedBarangayRiskBreakdown([]))
-  }, [selectedBarangayName, selectedMunicipalityName])
+  }, [riskLayerVersion, selectedBarangayName, selectedMunicipalityName])
 
   useEffect(() => {
     if (shouldShowBaselineOverlay) {
@@ -953,25 +952,6 @@ function PredictionPage() {
 
     setPendingBarangayClick(null)
   }, [barangayBoundaries, pendingBarangayClick, selectedMunicipalityName])
-
-  function runPrediction() {
-    setPredictionStatus('running')
-    scrollToPredictionMap()
-
-    axios
-      .post(`${API_BASE_URL}/predict`)
-      .then((response) =>
-        setLatestRunMetadata({
-          ...response.data,
-          layerType: 'model',
-          ranAt: new Date().toISOString(),
-        }),
-      )
-      .then(() => loadRiskZones())
-      .then(() => waitForMapPaint())
-      .then(() => setPredictionStatus('saved'))
-      .catch(() => setPredictionStatus('failed'))
-  }
 
   function resetBaselineMap() {
     setPredictionStatus('running')
@@ -1525,7 +1505,6 @@ function PredictionPage() {
                     predictionStatus={predictionStatus}
                     livePredictionStatus={livePredictionStatus}
                     resetBaselineMap={resetBaselineMap}
-                    runPrediction={runPrediction}
                     runLivePrediction={runLivePrediction}
                   />
                 </div>
@@ -1596,7 +1575,6 @@ function PredictionControls({
   predictionStatus,
   livePredictionStatus,
   resetBaselineMap,
-  runPrediction,
   runLivePrediction,
 }) {
   return (
@@ -1608,28 +1586,6 @@ function PredictionControls({
         <button
           type="button"
           className="btn btn-primary w-100"
-          onClick={runPrediction}
-          disabled={predictionStatus === 'running'}
-        >
-          <i className="ti ti-player-play me-1"></i>
-          {predictionStatus === 'running' ? 'Predicting...' : 'Run Prediction'}
-        </button>
-        <button
-          type="button"
-          className="btn btn-danger w-100 mt-3"
-          onClick={resetBaselineMap}
-          disabled={predictionStatus === 'running'}
-        >
-          <i className="ti ti-refresh me-1"></i>
-          Reset Map
-        </button>
-        <p className={`predict-status predict-status--${predictionStatus}`}>
-          Prediction: {predictionStatus}
-        </p>
-
-        <button
-          type="button"
-          className="btn btn-primary w-100 mt-3"
           onClick={runLivePrediction}
           disabled={livePredictionStatus === 'running'}
         >
@@ -1643,6 +1599,18 @@ function PredictionControls({
         </p>
         <p className={`predict-status predict-status--${livePredictionStatus}`}>
           Live feed: {livePredictionStatus}
+        </p>
+        <button
+          type="button"
+          className="btn btn-danger w-100 mt-3"
+          onClick={resetBaselineMap}
+          disabled={predictionStatus === 'running'}
+        >
+          <i className="ti ti-refresh me-1"></i>
+          Restore Baseline Hazard
+        </button>
+        <p className={`predict-status predict-status--${predictionStatus}`}>
+          Baseline: {predictionStatus}
         </p>
 
         <div className="prediction-provenance">

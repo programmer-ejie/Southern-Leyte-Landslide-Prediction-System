@@ -2,7 +2,7 @@
 const THEME_KEY = 'sl-lps-theme';
 const AUTH_USER_KEY = 'sl-lps-auth-user';
 const AUTH_TOKEN_KEY = 'sl-lps-auth-token';
-const API_BASE_URL = 'http://127.0.0.1:8000';
+const API_BASE_URL = new URLSearchParams(window.location.search).get('apiBaseUrl') || 'http://127.0.0.1:8000';
 let isDark = (localStorage.getItem(THEME_KEY) ?? 'light') === 'dark',
     currentUser = null;
 let chatHistory = [];
