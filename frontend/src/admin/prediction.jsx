@@ -804,6 +804,7 @@ function PredictionPage() {
     return axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
+        setApiStatus('connected')
         setRiskZones(response.data)
         return loadProvinceBoundary().then(() => {
           setRiskStatus('loaded')
@@ -819,7 +820,10 @@ function PredictionPage() {
   function loadProvinceBoundary() {
     return axios
       .get(`${API_BASE_URL}/province-boundary`)
-      .then((response) => setProvinceBoundary(response.data))
+      .then((response) => {
+        setApiStatus('connected')
+        setProvinceBoundary(response.data)
+      })
       .catch(() => setProvinceBoundary(null))
   }
 
@@ -856,6 +860,7 @@ function PredictionPage() {
     axios
       .get(`${API_BASE_URL}/municipality-boundaries`)
       .then((response) => {
+        setApiStatus('connected')
         setMunicipalityBoundaries(response.data)
         setMunicipalityStatus('loaded')
       })
@@ -881,6 +886,7 @@ function PredictionPage() {
         )}`,
       )
       .then((response) => {
+        setApiStatus('connected')
         if (isCurrentRequest && response.data?.geometry) {
           setSelectedMunicipalityBoundary(response.data)
         }
@@ -898,6 +904,7 @@ function PredictionPage() {
         )}/barangays`,
       )
       .then((response) => {
+        setApiStatus('connected')
         if (isCurrentRequest) {
           setBarangayBoundaries(response.data)
         }
@@ -933,9 +940,10 @@ function PredictionPage() {
           selectedMunicipalityName,
         )}/barangay/${encodeURIComponent(selectedBarangayName)}/risk-breakdown`,
       )
-      .then((response) =>
-        setSelectedBarangayRiskBreakdown(response.data?.risk_breakdown ?? []),
-      )
+      .then((response) => {
+        setApiStatus('connected')
+        setSelectedBarangayRiskBreakdown(response.data?.risk_breakdown ?? [])
+      })
       .catch(() => setSelectedBarangayRiskBreakdown([]))
   }, [riskLayerVersion, selectedBarangayName, selectedMunicipalityName])
 
