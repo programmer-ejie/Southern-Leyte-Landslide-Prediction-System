@@ -130,10 +130,21 @@ function SettingsPage() {
   }
 
   useEffect(() => {
-    axios
-      .get(`${API_BASE_URL}/health`)
-      .then(() => setApiStatus('connected'))
-      .catch(() => setApiStatus('offline'))
+    let isMounted = true
+
+    function checkApiHealth() {
+      axios
+        .get(`${API_BASE_URL}/health`)
+        .then(() => {
+          if (isMounted) setApiStatus('connected')
+        })
+        .catch(() => {
+          if (isMounted) setApiStatus('offline')
+        })
+    }
+
+    checkApiHealth()
+    const intervalId = window.setInterval(checkApiHealth, 30000)
 
     axios
       .get(`${API_BASE_URL}/db-health`)
@@ -147,6 +158,11 @@ function SettingsPage() {
 
     loadSettings()
     refreshMetadata()
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
   }, [])
 
   useEffect(() => {

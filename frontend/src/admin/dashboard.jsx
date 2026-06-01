@@ -354,10 +354,26 @@ function DashboardPage() {
   }, [displayedBaselineOverlayVersion, shouldShowBaselineOverlay])
 
   useEffect(() => {
-    axios
-      .get(`${API_BASE_URL}/health`)
-      .then(() => setApiStatus('connected'))
-      .catch(() => setApiStatus('offline'))
+    let isMounted = true
+
+    function checkApiHealth() {
+      axios
+        .get(`${API_BASE_URL}/health`)
+        .then(() => {
+          if (isMounted) setApiStatus('connected')
+        })
+        .catch(() => {
+          if (isMounted) setApiStatus('offline')
+        })
+    }
+
+    checkApiHealth()
+    const intervalId = window.setInterval(checkApiHealth, 30000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
   }, [])
 
   useEffect(() => {
@@ -365,6 +381,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
+        setApiStatus('connected')
         setRiskZones(response.data)
         setRiskStatus('loaded')
       })
@@ -377,6 +394,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/province-boundary`)
       .then((response) => {
+        setApiStatus('connected')
         setProvinceBoundary(response.data)
         setProvinceStatus('loaded')
       })
@@ -392,6 +410,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/municipality-boundaries`)
       .then((response) => {
+        setApiStatus('connected')
         setMunicipalityBoundaries(response.data)
         setMunicipalityStatus('loaded')
       })
@@ -407,6 +426,7 @@ function DashboardPage() {
     axios
       .get(`${API_BASE_URL}/barangay-boundaries`)
       .then((response) => {
+        setApiStatus('connected')
         setBarangayBoundaries(response.data)
         setBarangayStatus('loaded')
       })
