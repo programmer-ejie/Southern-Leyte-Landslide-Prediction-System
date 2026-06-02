@@ -91,6 +91,21 @@ function getRiskStyle(feature) {
   return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
 }
 
+function getSimulationRiskStyle(feature, stepPercent) {
+  const baseStyle = getRiskStyle(feature)
+  const intensity = Math.max(Number(stepPercent) || 0, 20) / 100
+
+  return {
+    ...baseStyle,
+    fillOpacity: Math.min(
+      0.78,
+      baseStyle.fillOpacity * (0.55 + intensity * 0.95),
+    ),
+    opacity: Math.min(1, 0.48 + intensity * 0.52),
+    weight: baseStyle.weight + (intensity >= 0.8 ? 0.8 : 0),
+  }
+}
+
 function sanitizeSimulationRiskZones(riskZoneData) {
   if (!riskZoneData?.features?.length) {
     return riskZoneData
@@ -994,7 +1009,11 @@ function RainfallScenariosPage() {
                         bounds={BASELINE_RISK_IMAGE_BOUNDS}
                         pane="baseline-risk-image"
                         url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`}
-                        opacity={1}
+                        opacity={
+                          simulationStep === SIMULATION_RESET_STEP
+                            ? 1
+                            : Math.max(0.46, 1 - activeStepPercent / 180)
+                        }
                       />
 
                       {riskZones &&
@@ -1008,7 +1027,9 @@ function RainfallScenariosPage() {
                                 riskPaneByLevel[feature.properties.risk_level] ??
                                 'risk-low'
                               }
-                              style={getRiskStyle}
+                              style={(riskFeature) =>
+                                getSimulationRiskStyle(riskFeature, activeStepPercent)
+                              }
                             />
                           ),
                         )}
