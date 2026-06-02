@@ -2188,6 +2188,89 @@ body {
   box-shadow: 0 10px 22px rgba(54, 115, 252, 0.28);
 }
 
+.simulation-example-panel {
+  background: rgba(54, 115, 252, 0.06);
+  border: 1px solid rgba(144, 189, 255, 0.14);
+  border-radius: 8px;
+  margin-bottom: 18px;
+  padding: 12px;
+}
+
+.simulation-example-panel--wide {
+  margin-bottom: 0;
+}
+
+.simulation-example-panel > span {
+  color: #9fb2d1;
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin-bottom: 10px;
+}
+
+.simulation-example-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.simulation-example-grid--wide {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.simulation-example-button {
+  background: rgba(8, 24, 48, 0.72);
+  border: 1px solid rgba(144, 189, 255, 0.16);
+  border-radius: 8px;
+  color: #f8fbff;
+  min-height: 58px;
+  padding: 9px 10px;
+  text-align: left;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.simulation-example-button:hover:not(:disabled) {
+  border-color: rgba(54, 115, 252, 0.68);
+  transform: translateY(-1px);
+}
+
+.simulation-example-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.simulation-example-button strong,
+.simulation-example-button small {
+  display: block;
+}
+
+.simulation-example-button strong {
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.2;
+  margin-bottom: 5px;
+}
+
+.simulation-example-button small {
+  color: #9fb2d1;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+@media (max-width: 1199.98px) {
+  .simulation-example-grid--wide {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767.98px) {
+  .simulation-example-grid--wide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .simulation-precompute-panel {
   background: rgba(54, 115, 252, 0.08);
   border: 1px solid rgba(54, 115, 252, 0.16);

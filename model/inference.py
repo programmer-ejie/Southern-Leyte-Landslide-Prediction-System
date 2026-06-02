@@ -228,6 +228,47 @@ def run_baseline_hazard_predictions(bounds=None):
     }
 
 
+def rainfall_scenario_pressure(total_rainfall_mm, saturation_factor, scenario_intensity=1.0):
+    """Convert rainfall inputs into LGU-style landslide preparedness pressure."""
+    intensity = 1.0 if scenario_intensity is None else max(min(float(scenario_intensity), 1.0), 0.0)
+    adjusted_rainfall_mm = (
+        max(float(total_rainfall_mm), 0.0)
+        * max(float(saturation_factor), 0.25)
+        * intensity
+    )
+
+    bands = [
+        (0.0, 25.0, 0.00, 0.02, "normal"),
+        (25.0, 50.0, 0.02, 0.08, "light_advisory"),
+        (50.0, 100.0, 0.08, 0.22, "preparedness"),
+        (100.0, 200.0, 0.22, 0.45, "heavy_rainfall"),
+        (200.0, 500.0, 0.45, 0.78, "severe_rainfall"),
+        (500.0, 1000.0, 0.78, 0.95, "typhoon_rainfall"),
+        (1000.0, 3000.0, 0.95, 1.00, "extreme_typhoon"),
+    ]
+
+    pressure = 1.0
+    advisory_level = "extreme_typhoon"
+    for low, high, low_pressure, high_pressure, label in bands:
+        if adjusted_rainfall_mm <= high:
+            span = max(high - low, 1.0)
+            fraction = max(min((adjusted_rainfall_mm - low) / span, 1.0), 0.0)
+            pressure = low_pressure + (high_pressure - low_pressure) * fraction
+            advisory_level = label
+            break
+
+    extreme_multiplier = 1.0
+    if adjusted_rainfall_mm > 1000.0:
+        extreme_multiplier += min((adjusted_rainfall_mm - 1000.0) / 2000.0, 0.5)
+
+    return {
+        "adjusted_rainfall_mm": adjusted_rainfall_mm,
+        "pressure": max(min(pressure, 1.0), 0.0),
+        "extreme_multiplier": extreme_multiplier,
+        "advisory_level": advisory_level,
+    }
+
+
 def run_rainfall_simulation(
     rainfall_mm_per_hr,
     duration_hours,
@@ -274,12 +315,20 @@ def run_rainfall_simulation(
     image = load_h5_image(input_image).astype("float32")
     baseline_hazard = _baseline_hazard_to_probability(_load_baseline_hazard_mask())
 
-    rainfall_boost = min(total_rainfall_mm / 250.0, 1.0) * min(saturation_factor, 5.0) / 5.0
-    scenario_pressure = min((total_rainfall_mm / 500.0) * max(saturation_factor, 0.25), 1.0)
+    scenario_calibration = rainfall_scenario_pressure(
+        total_rainfall_mm,
+        saturation_factor,
+        scenario_intensity,
+    )
+    adjusted_rainfall_mm = scenario_calibration["adjusted_rainfall_mm"]
+    scenario_pressure = scenario_calibration["pressure"]
+    extreme_multiplier = scenario_calibration["extreme_multiplier"]
+    rainfall_boost = min(adjusted_rainfall_mm / 500.0, 1.0) * min(
+        max(saturation_factor, 0.25),
+        5.0,
+    ) / 5.0
     if scenario_intensity is not None:
         scenario_intensity = max(min(float(scenario_intensity), 1.0), 0.0)
-        rainfall_boost *= scenario_intensity
-        scenario_pressure *= scenario_intensity
 
     baseline_rainfall = image[:, :, 3].copy()
     image[:, :, 3] = (0.55 * baseline_rainfall + 0.45 * rainfall_boost).clip(0.0, 1.0)
@@ -287,10 +336,15 @@ def run_rainfall_simulation(
     sample_input = normalized_image_to_tensor(image)
     probability_mask = predict_probability_mask(model, sample_input)
     model_probability = probability_mask.detach().cpu().numpy().squeeze()
-    rainfall_adjustment = (1.0 - baseline_hazard) * scenario_pressure * 0.55
-    model_adjustment = model_probability * scenario_pressure * 0.25
+    rainfall_adjustment = (1.0 - baseline_hazard) * scenario_pressure * 0.34
+    model_adjustment = model_probability * scenario_pressure * 0.18
+    extreme_adjustment = (
+        (1.0 - baseline_hazard)
+        * max(extreme_multiplier - 1.0, 0.0)
+        * 0.18
+    )
     probability_array = (
-        baseline_hazard + rainfall_adjustment + model_adjustment
+        baseline_hazard + rainfall_adjustment + model_adjustment + extreme_adjustment
     ).clip(0.0, 1.0)
     display_threshold = adaptive_mask_threshold(probability_array)
     predictions = probability_mask_to_risk_wkts(
@@ -311,9 +365,12 @@ def run_rainfall_simulation(
         "rainfall_mm_per_hr": float(rainfall_mm_per_hr),
         "duration_hours": float(duration_hours),
         "total_rainfall_mm": total_rainfall_mm,
+        "adjusted_rainfall_mm": adjusted_rainfall_mm,
         "saturation_factor": saturation_factor,
         "rainfall_boost": rainfall_boost,
         "scenario_pressure": scenario_pressure,
+        "extreme_multiplier": extreme_multiplier,
+        "advisory_level": scenario_calibration["advisory_level"],
         "scenario_intensity": scenario_intensity,
         "baseline_rainfall_mean": float(baseline_rainfall.mean()),
         "simulated_rainfall_mean": float(image[:, :, 3].mean()),

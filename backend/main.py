@@ -132,9 +132,9 @@ BASELINE_HAZARD_OVERLAY_BOUNDS = {
 
 
 class RainfallSimulationRequest(BaseModel):
-    rainfall_mm_per_hr: float = Field(ge=0, le=300)
-    duration_hours: float = Field(ge=0, le=168)
-    saturation_factor: float = Field(default=1.0, ge=0, le=5)
+    rainfall_mm_per_hr: float = Field(ge=0, le=100)
+    duration_hours: float = Field(ge=0, le=72)
+    saturation_factor: float = Field(default=1.0, ge=0.5, le=3)
     scenario_intensity: float | None = Field(default=None, ge=0, le=1)
 
 
@@ -1363,6 +1363,12 @@ def loss_exposure_summary():
 
 
 def risk_overlay_png_from_array(mask):
+    classes = baseline_hazard_classes_from_mask(mask)
+    return risk_overlay_png_from_classes(classes)
+
+
+def baseline_hazard_classes_from_mask(mask):
+    mask = np.clip(mask.astype("float32"), 0.0, 1.0)
     classes = np.zeros(mask.shape, dtype=np.uint8)
     class_specs = [
         (1, mask <= 0.151),
@@ -1379,14 +1385,17 @@ def risk_overlay_png_from_array(mask):
         Image.fromarray(classes, mode="L").filter(ImageFilter.ModeFilter(size=3))
     ).copy()
     classes[classes == 0] = 1
+    return classes
 
+
+def risk_overlay_png_from_classes(classes):
     rgba = np.zeros((*classes.shape, 4), dtype=np.uint8)
     fill_colors = {
-        1: (74, 222, 128, 142),
-        2: (163, 230, 53, 154),
-        3: (253, 224, 71, 168),
-        4: (251, 146, 60, 178),
-        5: (239, 68, 68, 188),
+        1: (34, 197, 94, 150),
+        2: (132, 204, 22, 160),
+        3: (250, 204, 21, 174),
+        4: (249, 115, 22, 184),
+        5: (220, 38, 38, 194),
     }
 
     for class_value, color in fill_colors.items():
@@ -1399,10 +1408,10 @@ def risk_overlay_png_from_array(mask):
     class_edges[:, 1:] |= classes[:, :-1] != classes[:, 1:]
 
     edge_colors = {
-        1: (47, 125, 50, 220),
-        2: (95, 138, 24, 220),
-        3: (180, 116, 16, 230),
-        4: (176, 78, 12, 230),
+        1: (21, 128, 61, 220),
+        2: (77, 124, 15, 220),
+        3: (161, 98, 7, 230),
+        4: (194, 65, 12, 230),
         5: (127, 29, 29, 235),
     }
     for class_value, color in edge_colors.items():
@@ -1465,90 +1474,62 @@ def risk_overlay_png_from_array(mask):
     return output.getvalue()
 
 
-def simulation_overlay_png_from_array(probability_array):
+def simulation_overlay_png_from_array(probability_array, scenario=None):
     probability = np.clip(probability_array.astype("float32"), 0.0, 1.0)
-    classes = np.zeros(probability.shape, dtype=np.uint8)
-    class_specs = [
-        (1, probability < 0.225),
-        (2, (probability >= 0.225) & (probability < 0.40)),
-        (3, (probability >= 0.40) & (probability < 0.625)),
-        (4, (probability >= 0.625) & (probability < 0.875)),
-        (5, probability >= 0.875),
-    ]
+    if not BASELINE_HAZARD_MASK_PATH.exists():
+        raise FileNotFoundError(BASELINE_HAZARD_MASK_PATH)
 
-    for class_value, selector in class_specs:
-        classes[selector] = class_value
+    with h5py.File(BASELINE_HAZARD_MASK_PATH, "r") as f:
+        baseline_mask = f["mask"][:].astype("float32")
 
-    classes = np.asarray(
-        Image.fromarray(classes, mode="L").filter(ImageFilter.ModeFilter(size=3))
-    ).copy()
-    classes[classes == 0] = 1
+    baseline_classes = baseline_hazard_classes_from_mask(baseline_mask)
+    baseline_probability = np.select(
+        [
+            baseline_classes == 1,
+            baseline_classes == 2,
+            baseline_classes == 3,
+            baseline_classes == 4,
+            baseline_classes == 5,
+        ],
+        [0.15, 0.30, 0.50, 0.75, 1.00],
+        default=0.15,
+    ).astype("float32")
 
-    rgba = np.zeros((*probability.shape, 4), dtype=np.uint8)
-    fill_colors = {
-        1: (74, 222, 128, 142),
-        2: (163, 230, 53, 154),
-        3: (253, 224, 71, 168),
-        4: (251, 146, 60, 178),
-        5: (239, 68, 68, 188),
+    scenario = scenario or {}
+    scenario_pressure = max(min(float(scenario.get("scenario_pressure", 1.0)), 1.0), 0.0)
+    extreme_multiplier = max(float(scenario.get("extreme_multiplier", 1.0)), 1.0)
+    raw_pressure = np.clip(probability - baseline_probability, 0.0, 1.0)
+    scenario_scale = min(scenario_pressure * 2.2, 1.0) * extreme_multiplier
+    pressure = raw_pressure * scenario_scale
+
+    susceptibility = np.zeros(baseline_classes.shape, dtype=np.float32)
+    susceptibility[baseline_classes == 1] = 0.15
+    susceptibility[baseline_classes == 2] = 0.25
+    susceptibility[baseline_classes == 3] = 0.35
+    susceptibility[baseline_classes == 4] = 0.45
+    band_pressure = (
+        max(scenario_pressure - 0.12, 0.0)
+        * susceptibility
+        * extreme_multiplier
+    )
+    pressure = np.maximum(pressure, band_pressure)
+
+    boost = np.zeros(baseline_classes.shape, dtype=np.uint8)
+    boost_thresholds_by_baseline_class = {
+        1: (0.22, 0.40, 0.60, 0.78),
+        2: (0.16, 0.32, 0.50, 0.68),
+        3: (0.12, 0.25, 0.42, 0.60),
+        4: (0.16, 0.30, 0.46, 0.65),
     }
+    for class_value, thresholds in boost_thresholds_by_baseline_class.items():
+        selector = baseline_classes == class_value
+        boost[selector & (pressure >= thresholds[0])] = 1
+        boost[selector & (pressure >= thresholds[1])] = 2
+        boost[selector & (pressure >= thresholds[2])] = 3
+        boost[selector & (pressure >= thresholds[3])] = 4
 
-    for class_value, color in fill_colors.items():
-        rgba[classes == class_value] = color
-
-    image_size = 1024
-    image = Image.fromarray(rgba, mode="RGBA")
-    image = image.resize((image_size, image_size), Image.Resampling.NEAREST)
-    rgba = np.asarray(image).copy()
-
-    boundary_mask = Image.new("L", (image_size, image_size), 0)
-    draw = ImageDraw.Draw(boundary_mask)
-    province = load_southern_leyte_province_boundary()
-
-    def to_pixel(coordinate):
-        lon, lat = coordinate[:2]
-        x = (
-            (lon - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"])
-            / (
-                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"]
-                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"]
-            )
-            * (image_size - 1)
-        )
-        y = (
-            (BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"] - lat)
-            / (
-                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"]
-                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"]
-            )
-            * (image_size - 1)
-        )
-        return (x, y)
-
-    def draw_polygon_rings(rings):
-        if not rings:
-            return
-
-        draw.polygon([to_pixel(point) for point in rings[0]], fill=255)
-        for hole in rings[1:]:
-            draw.polygon([to_pixel(point) for point in hole], fill=0)
-
-    geometry = province.get("geometry") if province else None
-    if geometry:
-        if geometry.get("type") == "Polygon":
-            draw_polygon_rings(geometry.get("coordinates", []))
-        elif geometry.get("type") == "MultiPolygon":
-            for polygon in geometry.get("coordinates", []):
-                draw_polygon_rings(polygon)
-
-    rgba[:, :, 3] = (
-        rgba[:, :, 3].astype("float32")
-        * (np.asarray(boundary_mask).astype("float32") / 255.0)
-    ).astype("uint8")
-
-    output = io.BytesIO()
-    Image.fromarray(rgba, mode="RGBA").save(output, format="PNG", optimize=True)
-    return output.getvalue()
+    simulation_classes = np.clip(baseline_classes + boost, 1, 5).astype(np.uint8)
+    return risk_overlay_png_from_classes(simulation_classes)
 
 
 def baseline_hazard_overlay_png():
@@ -1594,7 +1575,10 @@ def rainfall_simulation_overlay(
         raise HTTPException(status_code=404, detail="Simulation raster unavailable.")
 
     return Response(
-        content=simulation_overlay_png_from_array(probability_array),
+        content=simulation_overlay_png_from_array(
+            probability_array,
+            simulation_result.get("scenario"),
+        ),
         media_type="image/png",
         headers={"Cache-Control": "no-store, max-age=0"},
     )

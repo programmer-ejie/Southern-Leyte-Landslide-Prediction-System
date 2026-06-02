@@ -30,6 +30,44 @@ const SIMULATION_RESET_STEP = -1
 const SIMULATION_STEP_INTERVAL_MS = 900
 const SIMULATION_LOGS_PER_PAGE = 5
 const MAX_SIMULATION_POLYGON_EDGE_DEGREES = 0.12
+const RAINFALL_RATE_MIN = 0
+const RAINFALL_RATE_MAX = 100
+const DURATION_HOURS_MIN = 0
+const DURATION_HOURS_MAX = 72
+const SATURATION_FACTOR_MIN = 0.5
+const SATURATION_FACTOR_MAX = 3
+const SIMULATION_EXAMPLES = [
+  {
+    label: 'Normal',
+    rainfallRate: 5,
+    durationHours: 3,
+    saturationFactor: 1,
+  },
+  {
+    label: 'Preparedness',
+    rainfallRate: 12,
+    durationHours: 5,
+    saturationFactor: 1,
+  },
+  {
+    label: 'Heavy',
+    rainfallRate: 20,
+    durationHours: 6,
+    saturationFactor: 1.5,
+  },
+  {
+    label: 'Typhoon',
+    rainfallRate: 40,
+    durationHours: 12,
+    saturationFactor: 2,
+  },
+  {
+    label: 'Extreme',
+    rainfallRate: 60,
+    durationHours: 18,
+    saturationFactor: 3,
+  },
+]
 const numberFormatter = new Intl.NumberFormat('en-PH', {
   maximumFractionDigits: 1,
 })
@@ -63,6 +101,19 @@ function formatNumber(value) {
 
 function formatPeso(value) {
   return `PHP ${currencyFormatter.format(value ?? 0)}`
+}
+
+function clampScenarioValue(value, minimum, maximum) {
+  if (value === '') {
+    return ''
+  }
+
+  const parsedValue = Number(value)
+  if (!Number.isFinite(parsedValue)) {
+    return minimum
+  }
+
+  return Math.min(Math.max(parsedValue, minimum), maximum)
 }
 
 const riskStyles = {
@@ -314,8 +365,8 @@ function RainfallScenariosPage() {
     setApiStatus('connected')
   }
   const [riskZones, setRiskZones] = useState(null)
-  const [rainfallRate, setRainfallRate] = useState(120)
-  const [durationHours, setDurationHours] = useState(6)
+  const [rainfallRate, setRainfallRate] = useState(12)
+  const [durationHours, setDurationHours] = useState(5)
   const [saturationFactor, setSaturationFactor] = useState(1)
   const [isSimulationPlaying, setIsSimulationPlaying] = useState(false)
   const [isSimulationPrecomputing, setIsSimulationPrecomputing] = useState(false)
@@ -331,7 +382,7 @@ function RainfallScenariosPage() {
   const [simulationMapLoaderLabel, setSimulationMapLoaderLabel] = useState(
     'Loading simulation map',
   )
-  const [simulationOverlayUrl, setSimulationOverlayUrl] = useState(null)
+  const [simulationFrameUrls, setSimulationFrameUrls] = useState([])
   const [provinceBoundary, setProvinceBoundary] = useState(null)
   const [municipalityBoundaries, setMunicipalityBoundaries] = useState(null)
   const [barangayBoundaries, setBarangayBoundaries] = useState(null)
@@ -384,6 +435,8 @@ function RainfallScenariosPage() {
     simulationStep === SIMULATION_RESET_STEP
       ? 0
       : Math.round((SIMULATION_STEPS[simulationStep] ?? SIMULATION_STEPS[0]) * 100)
+  const hasActiveSimulationFrame =
+    simulationStep !== SIMULATION_RESET_STEP && Boolean(simulationFrameUrls[simulationStep])
   const intensityIndex = Math.min(
     100,
     Math.round(
@@ -639,6 +692,16 @@ function RainfallScenariosPage() {
     }
   }
 
+  function applySimulationExample(example) {
+    if (isSimulationPlaying || isSimulationPrecomputing) {
+      return
+    }
+
+    setRainfallRate(example.rainfallRate)
+    setDurationHours(example.durationHours)
+    setSaturationFactor(example.saturationFactor)
+  }
+
   function applyCachedSimulationStep(stepIndex, runId = simulationRunRef.current) {
     const snapshot = simulationStepSnapshotsRef.current[stepIndex]
 
@@ -649,7 +712,6 @@ function RainfallScenariosPage() {
     setRiskZones(snapshot.riskZones)
     setRiskStatus('preview')
     setSimulationStep(stepIndex)
-    setSimulationOverlayUrl(snapshot.overlayUrl ?? null)
     latestSimulationSnapshotRef.current = snapshot
   }
 
@@ -694,6 +756,7 @@ function RainfallScenariosPage() {
       }
 
       simulationStepSnapshotsRef.current = snapshots
+      setSimulationFrameUrls(snapshots.map((snapshot) => snapshot?.overlayUrl ?? null))
       return snapshots
     } catch {
       if (runId === simulationRunRef.current) {
@@ -721,7 +784,7 @@ function RainfallScenariosPage() {
     const runId = simulationRunRef.current
     setSimulationStartedAt(new Date().toLocaleString('en-PH'))
     setSimulationStep(SIMULATION_RESET_STEP)
-    setSimulationOverlayUrl(null)
+    setSimulationFrameUrls([])
     latestSimulationSnapshotRef.current = null
     simulationStepSnapshotsRef.current = []
     precomputeSimulationSteps(runId).then((snapshots) => {
@@ -741,7 +804,7 @@ function RainfallScenariosPage() {
     showLoader = false,
   ) {
     setSimulationStep(SIMULATION_RESET_STEP)
-    setSimulationOverlayUrl(null)
+    setSimulationFrameUrls([])
     setSimulationStatus('resetting')
 
     if (showLoader) {
@@ -774,7 +837,7 @@ function RainfallScenariosPage() {
     setIsSimulationPrecomputing(false)
     setSimulationPrecomputeProgress(0)
     setSimulationStartedAt(null)
-    setSimulationOverlayUrl(null)
+    setSimulationFrameUrls([])
     latestSimulationSnapshotRef.current = null
     simulationStepSnapshotsRef.current = []
     resetSimulationMapLayer(simulationRunRef.current, 'idle', true)
@@ -976,7 +1039,7 @@ function RainfallScenariosPage() {
                 icon="ti-cloud-rain"
                 label="Rainfall Rate"
                 value={`${formatNumber(rainfallRate)} mm/hr`}
-                note="Current scenario"
+                note="Scenario input"
               />
             </div>
             <div className="col-xl-3 col-md-6 col-12">
@@ -984,7 +1047,7 @@ function RainfallScenariosPage() {
                 icon="ti-clock-hour-6"
                 label="Duration"
                 value={`${formatNumber(durationHours)} hr`}
-                note="Simulation window"
+                note="Scenario input"
                 tone="info"
               />
             </div>
@@ -993,7 +1056,7 @@ function RainfallScenariosPage() {
                 icon="ti-droplet-filled"
                 label="Saturation"
                 value={formatNumber(saturationFactor)}
-                note="Soil factor"
+                note="Soil input"
                 tone="warning"
               />
             </div>
@@ -1002,9 +1065,33 @@ function RainfallScenariosPage() {
                 icon="ti-alert-triangle"
                 label="High Risk Zones"
                 value={formatNumber(highRiskZones)}
-                note={riskStatus}
+                note="Current preview"
                 tone="danger"
               />
+            </div>
+          </div>
+
+          <div className="row g-3 mb-3">
+            <div className="col-12">
+              <div className="simulation-example-panel simulation-example-panel--wide">
+                <span>Example simulation values</span>
+                <div className="simulation-example-grid simulation-example-grid--wide">
+                  {SIMULATION_EXAMPLES.map((example) => (
+                    <button
+                      key={example.label}
+                      type="button"
+                      className="simulation-example-button"
+                      onClick={() => applySimulationExample(example)}
+                      disabled={isSimulationPlaying || isSimulationPrecomputing}
+                    >
+                      <strong>{example.label}</strong>
+                      <small>
+                        {example.rainfallRate} mm/hr / {example.durationHours} hr / sat {example.saturationFactor}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1060,17 +1147,26 @@ function RainfallScenariosPage() {
                       <Pane name="simulation-municipalities" style={{ zIndex: 585 }} />
 
                       <ImageOverlay
-                        key={simulationOverlayUrl ?? displayedBaselineOverlayVersion}
+                        key={displayedBaselineOverlayVersion}
                         bounds={BASELINE_RISK_IMAGE_BOUNDS}
                         pane="baseline-risk-image"
-                        url={
-                          simulationOverlayUrl ??
-                          `${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`
-                        }
-                        opacity={1}
+                        url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`}
+                        opacity={hasActiveSimulationFrame ? 0 : 1}
                       />
 
-                      {!simulationOverlayUrl &&
+                      {simulationFrameUrls.map((frameUrl, frameIndex) =>
+                        frameUrl ? (
+                          <ImageOverlay
+                            key={`simulation-frame-${frameIndex}-${frameUrl}`}
+                            bounds={BASELINE_RISK_IMAGE_BOUNDS}
+                            pane="baseline-risk-image"
+                            url={frameUrl}
+                            opacity={frameIndex === simulationStep ? 1 : 0}
+                          />
+                        ) : null,
+                      )}
+
+                      {!hasActiveSimulationFrame &&
                         riskZones &&
                         riskZones.features.map((feature) =>
                           hasBaselineRiskLayer &&
@@ -1200,10 +1296,18 @@ function RainfallScenariosPage() {
                     id="scenario-rainfall"
                     className="form-control mb-3"
                     type="number"
-                    min="0"
-                    max="300"
+                    min={RAINFALL_RATE_MIN}
+                    max={RAINFALL_RATE_MAX}
                     value={rainfallRate}
-                    onChange={(event) => setRainfallRate(event.target.value)}
+                    onChange={(event) =>
+                      setRainfallRate(
+                        clampScenarioValue(
+                          event.target.value,
+                          RAINFALL_RATE_MIN,
+                          RAINFALL_RATE_MAX,
+                        ),
+                      )
+                    }
                   />
 
                   <label className="form-label" htmlFor="scenario-duration">
@@ -1213,10 +1317,18 @@ function RainfallScenariosPage() {
                     id="scenario-duration"
                     className="form-control mb-3"
                     type="number"
-                    min="0"
-                    max="168"
+                    min={DURATION_HOURS_MIN}
+                    max={DURATION_HOURS_MAX}
                     value={durationHours}
-                    onChange={(event) => setDurationHours(event.target.value)}
+                    onChange={(event) =>
+                      setDurationHours(
+                        clampScenarioValue(
+                          event.target.value,
+                          DURATION_HOURS_MIN,
+                          DURATION_HOURS_MAX,
+                        ),
+                      )
+                    }
                   />
 
                   <label className="form-label" htmlFor="scenario-saturation">
@@ -1226,11 +1338,19 @@ function RainfallScenariosPage() {
                     id="scenario-saturation"
                     className="form-control mb-4"
                     type="number"
-                    min="0"
-                    max="5"
+                    min={SATURATION_FACTOR_MIN}
+                    max={SATURATION_FACTOR_MAX}
                     step="0.1"
                     value={saturationFactor}
-                    onChange={(event) => setSaturationFactor(event.target.value)}
+                    onChange={(event) =>
+                      setSaturationFactor(
+                        clampScenarioValue(
+                          event.target.value,
+                          SATURATION_FACTOR_MIN,
+                          SATURATION_FACTOR_MAX,
+                        ),
+                      )
+                    }
                   />
 
                   <button
