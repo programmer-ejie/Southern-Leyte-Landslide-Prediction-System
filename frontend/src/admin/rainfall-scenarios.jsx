@@ -27,8 +27,9 @@ const BASELINE_RISK_IMAGE_BOUNDS = [
 const SIMULATION_STEPS = [0.2, 0.4, 0.6, 0.8, 1]
 const SIMULATION_PRECOMPUTE_ORDER = [4, 0, 1, 2, 3]
 const SIMULATION_RESET_STEP = -1
-const SIMULATION_STEP_INTERVAL_MS = 2000
+const SIMULATION_STEP_INTERVAL_MS = 900
 const SIMULATION_LOGS_PER_PAGE = 5
+const MAX_SIMULATION_POLYGON_EDGE_DEGREES = 0.12
 const numberFormatter = new Intl.NumberFormat('en-PH', {
   maximumFractionDigits: 1,
 })
@@ -88,6 +89,88 @@ const riskPaneByLevel = {
 
 function getRiskStyle(feature) {
   return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
+}
+
+function sanitizeSimulationRiskZones(riskZoneData) {
+  if (!riskZoneData?.features?.length) {
+    return riskZoneData
+  }
+
+  return {
+    ...riskZoneData,
+    features: riskZoneData.features
+      .map((feature) => {
+        const geometry = sanitizeSimulationGeometry(feature.geometry)
+
+        if (!geometry) {
+          return null
+        }
+
+        return {
+          ...feature,
+          geometry,
+        }
+      })
+      .filter(Boolean),
+  }
+}
+
+function sanitizeSimulationGeometry(geometry) {
+  if (!geometry) {
+    return null
+  }
+
+  if (geometry.type === 'Polygon') {
+    return polygonHasLongEdge(geometry.coordinates)
+      ? null
+      : geometry
+  }
+
+  if (geometry.type === 'MultiPolygon') {
+    const polygons = geometry.coordinates.filter(
+      (polygon) => !polygonHasLongEdge(polygon),
+    )
+
+    if (!polygons.length) {
+      return null
+    }
+
+    return {
+      ...geometry,
+      coordinates: polygons,
+    }
+  }
+
+  return geometry
+}
+
+function polygonHasLongEdge(polygonCoordinates) {
+  const exteriorRing = polygonCoordinates?.[0]
+
+  if (!Array.isArray(exteriorRing) || exteriorRing.length < 2) {
+    return true
+  }
+
+  return exteriorRing.some((point, index) => {
+    const nextPoint = exteriorRing[index + 1]
+
+    if (!nextPoint) {
+      return false
+    }
+
+    return coordinateDistance(point, nextPoint) > MAX_SIMULATION_POLYGON_EDGE_DEGREES
+  })
+}
+
+function coordinateDistance(pointA, pointB) {
+  if (!Array.isArray(pointA) || !Array.isArray(pointB)) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  return Math.hypot(
+    Number(pointA[0]) - Number(pointB[0]),
+    Number(pointA[1]) - Number(pointB[1]),
+  )
 }
 
 function SouthernLeyteMapFocus({ boundary }) {
@@ -298,7 +381,7 @@ function RainfallScenariosPage() {
       .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
         markApiConnected()
-        setRiskZones(response.data)
+        setRiskZones(sanitizeSimulationRiskZones(response.data))
         setRiskStatus('loaded')
         return response.data
       })
@@ -538,7 +621,7 @@ function RainfallScenariosPage() {
 
         const snapshot = buildSimulationStepSnapshot(
           stepIndex,
-          response.data?.risk_zones ?? null,
+          sanitizeSimulationRiskZones(response.data?.risk_zones ?? null),
         )
         snapshots[stepIndex] = snapshot
         setSimulationPrecomputeProgress(
@@ -641,7 +724,7 @@ function RainfallScenariosPage() {
 
     const timeoutId = window.setTimeout(() => {
       if (simulationStep === SIMULATION_STEPS.length - 1) {
-        resetSimulationMapLayer(simulationRunRef.current, 'playing')
+        applyCachedSimulationStep(0, simulationRunRef.current)
         return
       }
 
