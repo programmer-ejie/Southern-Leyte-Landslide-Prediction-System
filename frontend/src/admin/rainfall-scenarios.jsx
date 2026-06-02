@@ -127,6 +127,20 @@ function buildSimulationOverlayUrl({
   return `${API_BASE_URL}/rainfall-simulation-overlay.png?${params.toString()}`
 }
 
+function preloadImage(url) {
+  return new Promise((resolve, reject) => {
+    if (!url) {
+      resolve()
+      return
+    }
+
+    const image = new Image()
+    image.onload = () => resolve(url)
+    image.onerror = reject
+    image.src = url
+  })
+}
+
 function sanitizeSimulationRiskZones(riskZoneData) {
   if (!riskZoneData?.features?.length) {
     return riskZoneData
@@ -317,6 +331,7 @@ function RainfallScenariosPage() {
   const [simulationMapLoaderLabel, setSimulationMapLoaderLabel] = useState(
     'Loading simulation map',
   )
+  const [simulationOverlayUrl, setSimulationOverlayUrl] = useState(null)
   const [provinceBoundary, setProvinceBoundary] = useState(null)
   const [municipalityBoundaries, setMunicipalityBoundaries] = useState(null)
   const [barangayBoundaries, setBarangayBoundaries] = useState(null)
@@ -369,12 +384,6 @@ function RainfallScenariosPage() {
     simulationStep === SIMULATION_RESET_STEP
       ? 0
       : Math.round((SIMULATION_STEPS[simulationStep] ?? SIMULATION_STEPS[0]) * 100)
-  const simulationOverlayUrl = buildSimulationOverlayUrl({
-    activeStepPercent,
-    durationHours,
-    rainfallRate,
-    saturationFactor,
-  })
   const intensityIndex = Math.min(
     100,
     Math.round(
@@ -599,6 +608,7 @@ function RainfallScenariosPage() {
 
   function buildSimulationStepSnapshot(stepIndex, riskZoneData) {
     const stepMultiplier = SIMULATION_STEPS[stepIndex] ?? SIMULATION_STEPS[0]
+    const stepPercent = Math.round(stepMultiplier * 100)
 
     return {
       riskZones: riskZoneData,
@@ -608,7 +618,13 @@ function RainfallScenariosPage() {
         Math.max((Number(saturationFactor) || 0) * stepMultiplier, 0),
         5,
       ),
-      stepPercent: Math.round(stepMultiplier * 100),
+      stepPercent,
+      overlayUrl: buildSimulationOverlayUrl({
+        activeStepPercent: stepPercent,
+        durationHours,
+        rainfallRate,
+        saturationFactor,
+      }),
     }
   }
 
@@ -633,6 +649,7 @@ function RainfallScenariosPage() {
     setRiskZones(snapshot.riskZones)
     setRiskStatus('preview')
     setSimulationStep(stepIndex)
+    setSimulationOverlayUrl(snapshot.overlayUrl ?? null)
     latestSimulationSnapshotRef.current = snapshot
   }
 
@@ -663,6 +680,13 @@ function RainfallScenariosPage() {
           stepIndex,
           sanitizeSimulationRiskZones(response.data?.risk_zones ?? null),
         )
+        setSimulationPrecomputeLabel(`Loading ${stepPercent}% hazard tiles`)
+        await preloadImage(snapshot.overlayUrl)
+
+        if (runId !== simulationRunRef.current) {
+          return null
+        }
+
         snapshots[stepIndex] = snapshot
         setSimulationPrecomputeProgress(
           Math.round(((orderIndex + 1) / SIMULATION_PRECOMPUTE_ORDER.length) * 100),
@@ -697,6 +721,7 @@ function RainfallScenariosPage() {
     const runId = simulationRunRef.current
     setSimulationStartedAt(new Date().toLocaleString('en-PH'))
     setSimulationStep(SIMULATION_RESET_STEP)
+    setSimulationOverlayUrl(null)
     latestSimulationSnapshotRef.current = null
     simulationStepSnapshotsRef.current = []
     precomputeSimulationSteps(runId).then((snapshots) => {
@@ -716,6 +741,7 @@ function RainfallScenariosPage() {
     showLoader = false,
   ) {
     setSimulationStep(SIMULATION_RESET_STEP)
+    setSimulationOverlayUrl(null)
     setSimulationStatus('resetting')
 
     if (showLoader) {
@@ -748,6 +774,7 @@ function RainfallScenariosPage() {
     setIsSimulationPrecomputing(false)
     setSimulationPrecomputeProgress(0)
     setSimulationStartedAt(null)
+    setSimulationOverlayUrl(null)
     latestSimulationSnapshotRef.current = null
     simulationStepSnapshotsRef.current = []
     resetSimulationMapLayer(simulationRunRef.current, 'idle', true)

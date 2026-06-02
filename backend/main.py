@@ -1467,27 +1467,34 @@ def risk_overlay_png_from_array(mask):
 
 def simulation_overlay_png_from_array(probability_array):
     probability = np.clip(probability_array.astype("float32"), 0.0, 1.0)
-    rgba = np.zeros((*probability.shape, 4), dtype=np.uint8)
-    color_stops = [
-        (0.15, np.array((74, 222, 128), dtype=np.float32)),
-        (0.30, np.array((163, 230, 53), dtype=np.float32)),
-        (0.50, np.array((253, 224, 71), dtype=np.float32)),
-        (0.75, np.array((251, 146, 60), dtype=np.float32)),
-        (1.00, np.array((239, 68, 68), dtype=np.float32)),
+    classes = np.zeros(probability.shape, dtype=np.uint8)
+    class_specs = [
+        (1, probability < 0.225),
+        (2, (probability >= 0.225) & (probability < 0.40)),
+        (3, (probability >= 0.40) & (probability < 0.625)),
+        (4, (probability >= 0.625) & (probability < 0.875)),
+        (5, probability >= 0.875),
     ]
 
-    previous_value, previous_color = color_stops[0]
-    for value, color in color_stops:
-        selector = (probability >= previous_value) & (probability <= value)
-        denominator = max(value - previous_value, 0.001)
-        factor = ((probability[selector] - previous_value) / denominator)[:, None]
-        rgba[selector, :3] = (
-            previous_color + (color - previous_color) * factor
-        ).astype(np.uint8)
-        previous_value, previous_color = value, color
+    for class_value, selector in class_specs:
+        classes[selector] = class_value
 
-    rgba[probability < color_stops[0][0], :3] = color_stops[0][1].astype(np.uint8)
-    rgba[:, :, 3] = np.clip(118 + probability * 92, 118, 210).astype(np.uint8)
+    classes = np.asarray(
+        Image.fromarray(classes, mode="L").filter(ImageFilter.ModeFilter(size=3))
+    ).copy()
+    classes[classes == 0] = 1
+
+    rgba = np.zeros((*probability.shape, 4), dtype=np.uint8)
+    fill_colors = {
+        1: (74, 222, 128, 142),
+        2: (163, 230, 53, 154),
+        3: (253, 224, 71, 168),
+        4: (251, 146, 60, 178),
+        5: (239, 68, 68, 188),
+    }
+
+    for class_value, color in fill_colors.items():
+        rgba[classes == class_value] = color
 
     image_size = 1024
     image = Image.fromarray(rgba, mode="RGBA")
