@@ -135,6 +135,7 @@ class RainfallSimulationRequest(BaseModel):
     rainfall_mm_per_hr: float = Field(ge=0, le=300)
     duration_hours: float = Field(ge=0, le=168)
     saturation_factor: float = Field(default=1.0, ge=0, le=5)
+    scenario_intensity: float | None = Field(default=None, ge=0, le=1)
 
 
 class RainfallSimulationLogRequest(BaseModel):
@@ -2560,6 +2561,7 @@ def simulate_rainfall_preview(request: RainfallSimulationRequest):
         rainfall_mm_per_hr=request.rainfall_mm_per_hr,
         duration_hours=request.duration_hours,
         saturation_factor=request.saturation_factor,
+        scenario_intensity=request.scenario_intensity,
     )
 
     return {

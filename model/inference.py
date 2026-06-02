@@ -236,6 +236,7 @@ def run_rainfall_simulation(
     name_prefix=None,
     risk_surface="rainfall_simulated_model_probability",
     scenario_metadata=None,
+    scenario_intensity=None,
 ):
     """Run rainfall over the curated baseline hazard plus the local tensor model."""
     total_rainfall_mm = max(float(rainfall_mm_per_hr), 0.0) * max(float(duration_hours), 0.0)
@@ -275,6 +276,10 @@ def run_rainfall_simulation(
 
     rainfall_boost = min(total_rainfall_mm / 250.0, 1.0) * min(saturation_factor, 5.0) / 5.0
     scenario_pressure = min((total_rainfall_mm / 500.0) * max(saturation_factor, 0.25), 1.0)
+    if scenario_intensity is not None:
+        scenario_intensity = max(min(float(scenario_intensity), 1.0), 0.0)
+        rainfall_boost *= scenario_intensity
+        scenario_pressure *= scenario_intensity
 
     baseline_rainfall = image[:, :, 3].copy()
     image[:, :, 3] = (0.55 * baseline_rainfall + 0.45 * rainfall_boost).clip(0.0, 1.0)
@@ -309,6 +314,7 @@ def run_rainfall_simulation(
         "saturation_factor": saturation_factor,
         "rainfall_boost": rainfall_boost,
         "scenario_pressure": scenario_pressure,
+        "scenario_intensity": scenario_intensity,
         "baseline_rainfall_mean": float(baseline_rainfall.mean()),
         "simulated_rainfall_mean": float(image[:, :, 3].mean()),
         "baseline_hazard_mean": float(baseline_hazard.mean()),

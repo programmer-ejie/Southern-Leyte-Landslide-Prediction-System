@@ -574,12 +574,10 @@ function RainfallScenariosPage() {
     const stepMultiplier = SIMULATION_STEPS[stepIndex] ?? SIMULATION_STEPS[0]
 
     return {
-      rainfall_mm_per_hr: Number(rainfallRate) * stepMultiplier,
-      duration_hours: Number(durationHours) * stepMultiplier,
-      saturation_factor: Math.min(
-        Math.max((Number(saturationFactor) || 0) * stepMultiplier, 0),
-        5,
-      ),
+      rainfall_mm_per_hr: Number(rainfallRate),
+      duration_hours: Number(durationHours),
+      saturation_factor: Math.min(Math.max(Number(saturationFactor) || 0, 0), 5),
+      scenario_intensity: stepMultiplier,
     }
   }
 
