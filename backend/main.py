@@ -1489,14 +1489,6 @@ def simulation_overlay_png_from_array(probability_array):
     rgba[probability < color_stops[0][0], :3] = color_stops[0][1].astype(np.uint8)
     rgba[:, :, 3] = np.clip(118 + probability * 92, 118, 210).astype(np.uint8)
 
-    class_edges = np.zeros(probability.shape, dtype=bool)
-    classes = np.digitize(probability, [0.225, 0.40, 0.625, 0.875])
-    class_edges[:-1, :] |= classes[:-1, :] != classes[1:, :]
-    class_edges[1:, :] |= classes[:-1, :] != classes[1:, :]
-    class_edges[:, :-1] |= classes[:, :-1] != classes[:, 1:]
-    class_edges[:, 1:] |= classes[:, :-1] != classes[:, 1:]
-    rgba[class_edges] = (31, 41, 55, 205)
-
     image_size = 1024
     image = Image.fromarray(rgba, mode="RGBA")
     image = image.resize((image_size, image_size), Image.Resampling.NEAREST)
