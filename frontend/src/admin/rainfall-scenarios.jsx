@@ -90,18 +90,24 @@ function getRiskStyle(feature) {
   return riskStyles[feature.properties.risk_level] ?? riskStyles.Low
 }
 
-function SouthernLeyteMapFocus() {
+function SouthernLeyteMapFocus({ boundary }) {
   const map = useMap()
 
   useEffect(() => {
-    map.fitBounds(BASELINE_RISK_IMAGE_BOUNDS, { animate: false, padding: [18, 18] })
+    const bounds = boundary?.properties?.bounds ?? BASELINE_RISK_IMAGE_BOUNDS
+
+    map.invalidateSize()
+    map.fitBounds(bounds, {
+      animate: false,
+      padding: [20, 20],
+    })
     map.dragging.disable()
     map.scrollWheelZoom.disable()
     map.doubleClickZoom.disable()
     map.boxZoom.disable()
     map.keyboard.disable()
     map.touchZoom.disable()
-  }, [map])
+  }, [boundary, map])
 
   return null
 }
@@ -883,7 +889,7 @@ function RainfallScenariosPage() {
                       boxZoom={false}
                       keyboard={false}
                     >
-                      <SouthernLeyteMapFocus />
+                      <SouthernLeyteMapFocus boundary={provinceBoundary} />
                       <TileLayer
                         attribution="&copy; OpenStreetMap contributors &copy; CARTO"
                         url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png"
