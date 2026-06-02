@@ -1362,13 +1362,7 @@ def loss_exposure_summary():
     return load_loss_exposure_data()
 
 
-def baseline_hazard_overlay_png():
-    if not BASELINE_HAZARD_MASK_PATH.exists():
-        raise FileNotFoundError(BASELINE_HAZARD_MASK_PATH)
-
-    with h5py.File(BASELINE_HAZARD_MASK_PATH, "r") as f:
-        mask = f["mask"][:].astype("float32")
-
+def risk_overlay_png_from_array(mask):
     classes = np.zeros(mask.shape, dtype=np.uint8)
     class_specs = [
         (1, mask <= 0.151),
@@ -1471,6 +1465,16 @@ def baseline_hazard_overlay_png():
     return output.getvalue()
 
 
+def baseline_hazard_overlay_png():
+    if not BASELINE_HAZARD_MASK_PATH.exists():
+        raise FileNotFoundError(BASELINE_HAZARD_MASK_PATH)
+
+    with h5py.File(BASELINE_HAZARD_MASK_PATH, "r") as f:
+        mask = f["mask"][:].astype("float32")
+
+    return risk_overlay_png_from_array(mask)
+
+
 @app.get("/baseline-risk-overlay.png")
 def baseline_risk_overlay():
     try:
@@ -1480,6 +1484,31 @@ def baseline_risk_overlay():
 
     return Response(
         content=image_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/rainfall-simulation-overlay.png")
+def rainfall_simulation_overlay(
+    rainfall_mm_per_hr: float,
+    duration_hours: float,
+    saturation_factor: float = 1.0,
+    scenario_intensity: float = 1.0,
+):
+    simulation_result = run_rainfall_simulation(
+        rainfall_mm_per_hr=rainfall_mm_per_hr,
+        duration_hours=duration_hours,
+        saturation_factor=saturation_factor,
+        scenario_intensity=scenario_intensity,
+    )
+    probability_array = simulation_result.get("probability_array")
+
+    if probability_array is None:
+        raise HTTPException(status_code=404, detail="Simulation raster unavailable.")
+
+    return Response(
+        content=risk_overlay_png_from_array(probability_array),
         media_type="image/png",
         headers={"Cache-Control": "no-store, max-age=0"},
     )

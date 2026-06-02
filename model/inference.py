@@ -339,6 +339,7 @@ def run_rainfall_simulation(
             "display_threshold": display_threshold,
             "predicted_pixel_count": int((probability_array >= display_threshold).sum()),
         },
+        "probability_array": probability_array,
         "predictions": predictions,
     }
 

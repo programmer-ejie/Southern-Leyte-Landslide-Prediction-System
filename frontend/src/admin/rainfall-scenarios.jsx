@@ -106,6 +106,27 @@ function getSimulationRiskStyle(feature, stepPercent) {
   }
 }
 
+function buildSimulationOverlayUrl({
+  activeStepPercent,
+  durationHours,
+  rainfallRate,
+  saturationFactor,
+}) {
+  if (!activeStepPercent) {
+    return null
+  }
+
+  const params = new URLSearchParams({
+    rainfall_mm_per_hr: String(Number(rainfallRate) || 0),
+    duration_hours: String(Number(durationHours) || 0),
+    saturation_factor: String(Math.min(Math.max(Number(saturationFactor) || 0, 0), 5)),
+    scenario_intensity: String(activeStepPercent / 100),
+    v: `${rainfallRate}-${durationHours}-${saturationFactor}-${activeStepPercent}`,
+  })
+
+  return `${API_BASE_URL}/rainfall-simulation-overlay.png?${params.toString()}`
+}
+
 function sanitizeSimulationRiskZones(riskZoneData) {
   if (!riskZoneData?.features?.length) {
     return riskZoneData
@@ -348,6 +369,12 @@ function RainfallScenariosPage() {
     simulationStep === SIMULATION_RESET_STEP
       ? 0
       : Math.round((SIMULATION_STEPS[simulationStep] ?? SIMULATION_STEPS[0]) * 100)
+  const simulationOverlayUrl = buildSimulationOverlayUrl({
+    activeStepPercent,
+    durationHours,
+    rainfallRate,
+    saturationFactor,
+  })
   const intensityIndex = Math.min(
     100,
     Math.round(
@@ -1008,15 +1035,15 @@ function RainfallScenariosPage() {
                       <ImageOverlay
                         bounds={BASELINE_RISK_IMAGE_BOUNDS}
                         pane="baseline-risk-image"
-                        url={`${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`}
-                        opacity={
-                          simulationStep === SIMULATION_RESET_STEP
-                            ? 1
-                            : Math.max(0.62, 1 - activeStepPercent / 240)
+                        url={
+                          simulationOverlayUrl ??
+                          `${API_BASE_URL}/baseline-risk-overlay.png?v=${displayedBaselineOverlayVersion}`
                         }
+                        opacity={1}
                       />
 
-                      {riskZones &&
+                      {!simulationOverlayUrl &&
+                        riskZones &&
                         riskZones.features.map((feature) =>
                           hasBaselineRiskLayer &&
                           feature.properties.name?.startsWith('Baseline Hazard') ? null : (
