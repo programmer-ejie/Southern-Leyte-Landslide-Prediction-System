@@ -98,11 +98,11 @@ function getSimulationRiskStyle(feature, stepPercent) {
   return {
     ...baseStyle,
     fillOpacity: Math.min(
-      0.78,
-      baseStyle.fillOpacity * (0.55 + intensity * 0.95),
+      0.52,
+      baseStyle.fillOpacity * (0.48 + intensity * 0.62),
     ),
-    opacity: Math.min(1, 0.48 + intensity * 0.52),
-    weight: baseStyle.weight + (intensity >= 0.8 ? 0.8 : 0),
+    opacity: Math.min(0.92, 0.42 + intensity * 0.5),
+    weight: baseStyle.weight + (intensity >= 0.8 ? 0.4 : 0),
   }
 }
 
@@ -1012,7 +1012,7 @@ function RainfallScenariosPage() {
                         opacity={
                           simulationStep === SIMULATION_RESET_STEP
                             ? 1
-                            : Math.max(0.46, 1 - activeStepPercent / 180)
+                            : Math.max(0.62, 1 - activeStepPercent / 240)
                         }
                       />
 
@@ -1186,15 +1186,15 @@ function RainfallScenariosPage() {
                     onClick={toggleRainfallSimulation}
                     disabled={isSimulationPrecomputing}
                   >
-                    <i
-                      className={`ti ${
-                        isSimulationPrecomputing
-                          ? 'ti-loader-2'
-                          : isSimulationPlaying
-                            ? 'ti-player-stop'
-                            : 'ti-player-play'
-                      } me-1`}
-                    ></i>
+                    {isSimulationPrecomputing ? (
+                      <span className="simulation-button-spinner" aria-hidden="true"></span>
+                    ) : (
+                      <i
+                        className={`ti ${
+                          isSimulationPlaying ? 'ti-player-stop' : 'ti-player-play'
+                        } me-1`}
+                      ></i>
+                    )}
                     {isSimulationPrecomputing
                       ? 'Preparing Simulation...'
                       : isSimulationPlaying

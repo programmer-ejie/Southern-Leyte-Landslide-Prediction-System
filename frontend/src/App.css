@@ -2222,11 +2222,35 @@ body {
   background: #3673fc;
   border-radius: inherit;
   height: 100%;
+  position: relative;
   transition: width 0.2s ease;
 }
 
-.simulation-builder-card .ti-loader-2 {
-  animation: prediction-loader-spin 0.95s linear infinite;
+.simulation-precompute-fill::after {
+  animation: simulation-progress-shimmer 1s linear infinite;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.48),
+    transparent
+  );
+  bottom: 0;
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 42px;
+}
+
+.simulation-button-spinner {
+  animation: prediction-loader-spin 0.75s linear infinite;
+  border: 2px solid rgba(255, 255, 255, 0.38);
+  border-radius: 999px;
+  border-top-color: #ffffff;
+  display: inline-block;
+  height: 16px;
+  margin-right: 8px;
+  vertical-align: -3px;
+  width: 16px;
 }
 
 .simulation-map-loader,
@@ -2912,6 +2936,16 @@ body {
 @keyframes prediction-loader-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes simulation-progress-shimmer {
+  from {
+    left: -42px;
+  }
+
+  to {
+    left: 100%;
   }
 }
 
