@@ -293,7 +293,7 @@ def run_rainfall_simulation(
         bounds=bounds or _load_tile_bounds(),
         name_prefix=name_prefix,
         min_pixels=1,
-        simplify_tolerance=0 if scenario_pressure == 0 else 0.0015,
+        simplify_tolerance=0,
         band_specs=[
             (1, "15%", f"{name_prefix} 15% Risk", 0.00, 0.225),
             (2, "30%", f"{name_prefix} 30% Risk", 0.225, 0.40),
