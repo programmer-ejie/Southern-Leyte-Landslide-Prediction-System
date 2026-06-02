@@ -1033,6 +1033,7 @@ function RainfallScenariosPage() {
                       <Pane name="simulation-municipalities" style={{ zIndex: 585 }} />
 
                       <ImageOverlay
+                        key={simulationOverlayUrl ?? displayedBaselineOverlayVersion}
                         bounds={BASELINE_RISK_IMAGE_BOUNDS}
                         pane="baseline-risk-image"
                         url={

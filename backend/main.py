@@ -1465,6 +1465,93 @@ def risk_overlay_png_from_array(mask):
     return output.getvalue()
 
 
+def simulation_overlay_png_from_array(probability_array):
+    probability = np.clip(probability_array.astype("float32"), 0.0, 1.0)
+    rgba = np.zeros((*probability.shape, 4), dtype=np.uint8)
+    color_stops = [
+        (0.15, np.array((74, 222, 128), dtype=np.float32)),
+        (0.30, np.array((163, 230, 53), dtype=np.float32)),
+        (0.50, np.array((253, 224, 71), dtype=np.float32)),
+        (0.75, np.array((251, 146, 60), dtype=np.float32)),
+        (1.00, np.array((239, 68, 68), dtype=np.float32)),
+    ]
+
+    previous_value, previous_color = color_stops[0]
+    for value, color in color_stops:
+        selector = (probability >= previous_value) & (probability <= value)
+        denominator = max(value - previous_value, 0.001)
+        factor = ((probability[selector] - previous_value) / denominator)[:, None]
+        rgba[selector, :3] = (
+            previous_color + (color - previous_color) * factor
+        ).astype(np.uint8)
+        previous_value, previous_color = value, color
+
+    rgba[probability < color_stops[0][0], :3] = color_stops[0][1].astype(np.uint8)
+    rgba[:, :, 3] = np.clip(118 + probability * 92, 118, 210).astype(np.uint8)
+
+    class_edges = np.zeros(probability.shape, dtype=bool)
+    classes = np.digitize(probability, [0.225, 0.40, 0.625, 0.875])
+    class_edges[:-1, :] |= classes[:-1, :] != classes[1:, :]
+    class_edges[1:, :] |= classes[:-1, :] != classes[1:, :]
+    class_edges[:, :-1] |= classes[:, :-1] != classes[:, 1:]
+    class_edges[:, 1:] |= classes[:, :-1] != classes[:, 1:]
+    rgba[class_edges] = (31, 41, 55, 205)
+
+    image_size = 1024
+    image = Image.fromarray(rgba, mode="RGBA")
+    image = image.resize((image_size, image_size), Image.Resampling.NEAREST)
+    rgba = np.asarray(image).copy()
+
+    boundary_mask = Image.new("L", (image_size, image_size), 0)
+    draw = ImageDraw.Draw(boundary_mask)
+    province = load_southern_leyte_province_boundary()
+
+    def to_pixel(coordinate):
+        lon, lat = coordinate[:2]
+        x = (
+            (lon - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"])
+            / (
+                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"]
+                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lon"]
+            )
+            * (image_size - 1)
+        )
+        y = (
+            (BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"] - lat)
+            / (
+                BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"]
+                - BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"]
+            )
+            * (image_size - 1)
+        )
+        return (x, y)
+
+    def draw_polygon_rings(rings):
+        if not rings:
+            return
+
+        draw.polygon([to_pixel(point) for point in rings[0]], fill=255)
+        for hole in rings[1:]:
+            draw.polygon([to_pixel(point) for point in hole], fill=0)
+
+    geometry = province.get("geometry") if province else None
+    if geometry:
+        if geometry.get("type") == "Polygon":
+            draw_polygon_rings(geometry.get("coordinates", []))
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in geometry.get("coordinates", []):
+                draw_polygon_rings(polygon)
+
+    rgba[:, :, 3] = (
+        rgba[:, :, 3].astype("float32")
+        * (np.asarray(boundary_mask).astype("float32") / 255.0)
+    ).astype("uint8")
+
+    output = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
 def baseline_hazard_overlay_png():
     if not BASELINE_HAZARD_MASK_PATH.exists():
         raise FileNotFoundError(BASELINE_HAZARD_MASK_PATH)
@@ -1508,7 +1595,7 @@ def rainfall_simulation_overlay(
         raise HTTPException(status_code=404, detail="Simulation raster unavailable.")
 
     return Response(
-        content=risk_overlay_png_from_array(probability_array),
+        content=simulation_overlay_png_from_array(probability_array),
         media_type="image/png",
         headers={"Cache-Control": "no-store, max-age=0"},
     )
