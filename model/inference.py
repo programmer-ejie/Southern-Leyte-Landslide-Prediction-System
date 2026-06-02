@@ -10,7 +10,10 @@ from model.postprocessing import (
     probability_mask_to_polygon_wkt,
     probability_mask_to_risk_wkts,
 )
-from model.live_weather import fetch_live_rainfall_forecast
+from model.live_weather import (
+    LiveRainfallForecastUnavailable,
+    fetch_live_rainfall_forecast,
+)
 from model.preprocessing import (
     DEFAULT_SAMPLE_IMAGE,
     load_h5_image,
@@ -335,7 +338,33 @@ def run_rainfall_simulation(
 
 
 def run_live_rainfall_prediction(bounds=None):
-    live_rainfall = fetch_live_rainfall_forecast()
+    try:
+        live_rainfall = fetch_live_rainfall_forecast()
+    except LiveRainfallForecastUnavailable as exc:
+        baseline_result = run_baseline_hazard_predictions(bounds=bounds)
+        live_weather = {
+            **exc.metadata,
+            "forecast_unavailable": True,
+            "fallback_to_baseline": True,
+            "unavailable_reason": exc.reason,
+        }
+
+        return {
+            "model": baseline_result["model"],
+            "checkpoint": baseline_result["checkpoint"],
+            "scenario": {
+                "live_weather": live_weather,
+                "fallback_to_baseline": True,
+                "no_rainfall_passthrough": True,
+            },
+            "inference_check": {
+                **baseline_result["inference_check"],
+                "risk_surface": "osm_manual_noah_5level_target",
+                "live_forecast_unavailable": True,
+            },
+            "predictions": baseline_result["predictions"],
+        }
+
     scenario_label = (
         f"{live_rainfall['total_forecast_rainfall_mm']:.1f}mm/"
         f"{live_rainfall['duration_hours']:.0f}h"

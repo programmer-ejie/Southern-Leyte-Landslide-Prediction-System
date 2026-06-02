@@ -22,7 +22,7 @@ const SOUTHERN_LEYTE_BOUNDS = [
 ]
 const BASELINE_RISK_IMAGE_BOUNDS = [
   [9.88, 124.62],
-  [10.55, 125.35],
+  [10.622240066000074, 125.35],
 ]
 
 const MUNICIPALITIES = [
@@ -1019,7 +1019,7 @@ function PredictionPage() {
       .then((response) =>
         setLatestRunMetadata({
           ...response.data,
-          layerType: 'live',
+          layerType: response.data.layer_type ?? 'live',
           ranAt: new Date().toISOString(),
         }),
       )

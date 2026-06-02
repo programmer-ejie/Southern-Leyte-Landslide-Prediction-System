@@ -127,7 +127,7 @@ BASELINE_HAZARD_OVERLAY_BOUNDS = {
     "min_lon": 124.62,
     "min_lat": 9.88,
     "max_lon": 125.35,
-    "max_lat": 10.55,
+    "max_lat": 10.622240066000074,
 }
 
 
@@ -653,33 +653,6 @@ def load_prediction_tile_boundary():
     min_lat = BASELINE_HAZARD_OVERLAY_BOUNDS["min_lat"]
     max_lon = BASELINE_HAZARD_OVERLAY_BOUNDS["max_lon"]
     max_lat = BASELINE_HAZARD_OVERLAY_BOUNDS["max_lat"]
-
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT
-                        ST_XMin(bounds) AS min_lon,
-                        ST_YMin(bounds) AS min_lat,
-                        ST_XMax(bounds) AS max_lon,
-                        ST_YMax(bounds) AS max_lat
-                    FROM (
-                        SELECT ST_Extent(geom)::box2d AS bounds
-                        FROM risk_zones
-                    ) AS risk_bounds
-                    WHERE bounds IS NOT NULL;
-                    """
-                )
-            ).mappings().first()
-
-        if row:
-            min_lon = float(row["min_lon"])
-            min_lat = float(row["min_lat"])
-            max_lon = float(row["max_lon"])
-            max_lat = float(row["max_lat"])
-    except Exception:
-        pass
 
     tile_bounds = box(
         min_lon,
@@ -2543,9 +2516,17 @@ def predict():
 def predict_live():
     prediction_result = run_live_rainfall_prediction()
     rows = replace_risk_zones(prediction_result["predictions"])
+    used_baseline_fallback = bool(
+        prediction_result.get("scenario", {}).get("fallback_to_baseline")
+    )
 
     return {
-        "message": "Live rainfall prediction saved",
+        "message": (
+            "Live rainfall forecast unavailable; baseline hazard layer restored"
+            if used_baseline_fallback
+            else "Live rainfall prediction saved"
+        ),
+        "layer_type": "baseline" if used_baseline_fallback else "live",
         "model": prediction_result["model"],
         "checkpoint": prediction_result["checkpoint"],
         "scenario": prediction_result["scenario"],

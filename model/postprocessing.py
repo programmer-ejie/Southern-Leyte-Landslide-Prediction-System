@@ -32,7 +32,7 @@ SOUTHERN_LEYTE_DEMO_BOUNDS = {
     "min_lon": 124.62,
     "min_lat": 9.88,
     "max_lon": 125.35,
-    "max_lat": 10.55,
+    "max_lat": 10.622240066000074,
 }
 
 
