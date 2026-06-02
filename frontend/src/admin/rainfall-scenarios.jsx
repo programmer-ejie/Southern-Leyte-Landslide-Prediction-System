@@ -99,7 +99,7 @@ function SouthernLeyteMapFocus({ boundary }) {
     map.invalidateSize()
     map.fitBounds(bounds, {
       animate: false,
-      padding: [20, 20],
+      padding: [4, 4],
     })
     map.dragging.disable()
     map.scrollWheelZoom.disable()
@@ -877,6 +877,8 @@ function RainfallScenariosPage() {
                     <MapContainer
                       center={SOUTHERN_LEYTE_POSITION}
                       zoom={10}
+                      zoomSnap={0.1}
+                      zoomDelta={0.5}
                       className="map-view"
                       zoomControl={false}
                       scrollWheelZoom={false}
