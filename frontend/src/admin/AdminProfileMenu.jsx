@@ -1,23 +1,42 @@
 import { useEffect, useRef, useState } from 'react'
+import { isAdminUser } from './auth-session'
 
 const AUTH_USER_KEY = 'sl-lps-auth-user'
 
-function getUserInitials() {
+function getUserAvatar() {
   try {
     const user = JSON.parse(localStorage.getItem(AUTH_USER_KEY) || 'null')
     const firstInitial = user?.firstName?.trim()?.[0] || ''
     const lastInitial = user?.lastName?.trim()?.[0] || ''
     const initials = `${firstInitial}${lastInitial}`.toUpperCase()
 
-    return initials || 'SL'
+    return {
+      initials: initials || 'SL',
+      photoDataUrl: user?.photoDataUrl || '',
+    }
   } catch (_) {
-    return 'SL'
+    return {
+      initials: 'SL',
+      photoDataUrl: '',
+    }
+  }
+}
+
+function getAvatarFromUser(user) {
+  const firstInitial = user?.firstName?.trim()?.[0] || ''
+  const lastInitial = user?.lastName?.trim()?.[0] || ''
+  const initials = `${firstInitial}${lastInitial}`.toUpperCase()
+
+  return {
+    initials: initials || 'SL',
+    photoDataUrl: user?.photoDataUrl || '',
   }
 }
 
 function AdminProfileMenu() {
   const [isOpen, setIsOpen] = useState(false)
-  const [initials, setInitials] = useState(() => getUserInitials())
+  const [avatar, setAvatar] = useState(() => getUserAvatar())
+  const [photoLoadFailed, setPhotoLoadFailed] = useState(false)
   const menuRef = useRef(null)
 
   useEffect(() => {
@@ -32,8 +51,20 @@ function AdminProfileMenu() {
   }, [])
 
   useEffect(() => {
-    setInitials(getUserInitials())
+    setAvatar(getUserAvatar())
+
+    function handleProfileUpdate(event) {
+      setAvatar(event.detail ? getAvatarFromUser(event.detail) : getUserAvatar())
+      setPhotoLoadFailed(false)
+    }
+
+    window.addEventListener('admin-profile-updated', handleProfileUpdate)
+    return () => window.removeEventListener('admin-profile-updated', handleProfileUpdate)
   }, [])
+
+  useEffect(() => {
+    setPhotoLoadFailed(false)
+  }, [avatar.photoDataUrl])
 
   return (
     <li className="position-relative" ref={menuRef}>
@@ -44,11 +75,25 @@ function AdminProfileMenu() {
         aria-expanded={isOpen}
         aria-label="Open profile menu"
       >
-        <span className="avatar-initials rounded-circle">{initials}</span>
+        {avatar.photoDataUrl && !photoLoadFailed ? (
+          <img src={avatar.photoDataUrl} alt="" onError={() => setPhotoLoadFailed(true)} />
+        ) : (
+          <span className="avatar-initials rounded-circle">{avatar.initials}</span>
+        )}
       </button>
 
       {isOpen ? (
         <div className="profile-dropdown">
+          <a className="profile-dropdown-item" href="/admin/profile">
+            <i className="ti ti-user-circle"></i>
+            <span>Profile</span>
+          </a>
+          {isAdminUser() ? (
+            <a className="profile-dropdown-item" href="/admin/accounts">
+              <i className="ti ti-users-plus"></i>
+              <span>Accounts</span>
+            </a>
+          ) : null}
           <a className="profile-dropdown-item" href="/admin/reports">
             <i className="ti ti-receipt"></i>
             <span>Reports</span>

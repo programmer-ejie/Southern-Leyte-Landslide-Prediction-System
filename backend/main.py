@@ -8,6 +8,7 @@ import hashlib
 import io
 import secrets
 import time
+import urllib.request
 from pathlib import Path
 from functools import lru_cache
 
@@ -15,7 +16,7 @@ import h5py
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
@@ -93,6 +94,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 JWT_SECRET = os.getenv("JWT_SECRET", "sl-lps-local-development-secret")
 JWT_EXPIRES_SECONDS = 60 * 60 * 8
+DEFAULT_OFFICE = "Provincial Disaster Risk Reduction and Management Office"
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "").strip()
+IMGBB_UPLOAD_URL = "https://api.imgbb.com/1/upload"
 
 
 EXPOSURE_DIR = PROJECT_ROOT / "data" / "raw" / "southern_leyte" / "exposure"
@@ -157,6 +161,34 @@ class RainfallSimulationLogRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class CreateAccountRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=8)
+    firstName: str = Field(min_length=1)
+    middleName: str | None = None
+    lastName: str = Field(min_length=1)
+    jobRole: str | None = None
+
+
+class UpdateAccountRequest(BaseModel):
+    email: str
+    password: str | None = Field(default=None, min_length=8)
+    firstName: str = Field(min_length=1)
+    middleName: str | None = None
+    lastName: str = Field(min_length=1)
+    jobRole: str | None = None
+
+
+class ProfileUpdateRequest(BaseModel):
+    email: str
+    firstName: str = Field(min_length=1)
+    middleName: str | None = None
+    lastName: str = Field(min_length=1)
+    phone: str | None = None
+    jobRole: str | None = None
+    photoDataUrl: str | None = None
 
 
 class SystemSettingsRequest(BaseModel):
@@ -285,6 +317,12 @@ def verify_password(password: str, salt: str, password_hash: str) -> bool:
 
 
 def user_response(row):
+    job_role = row.get("job_role") if hasattr(row, "get") else row["job_role"]
+    phone = row.get("phone_number") if hasattr(row, "get") else None
+    office = row.get("office") if hasattr(row, "get") else None
+    photo_url = row.get("profile_photo_url") if hasattr(row, "get") else None
+    photo_data_url = row.get("profile_photo_data_url") if hasattr(row, "get") else None
+
     return {
         "id": row["id"],
         "email": row["email"],
@@ -292,11 +330,78 @@ def user_response(row):
         "middleName": row["middle_name"],
         "lastName": row["last_name"],
         "role": row["role"],
+        "jobRole": job_role or ("System Administrator" if row["role"] == "admin" else None),
+        "phone": phone,
+        "office": office or DEFAULT_OFFICE,
+        "photoDataUrl": photo_url or photo_data_url,
     }
+
+
+def upload_profile_photo_to_imgbb(photo_value: str | None) -> str | None:
+    if not photo_value:
+        return None
+
+    if photo_value.startswith(("http://", "https://")):
+        return photo_value
+
+    if not photo_value.startswith("data:image/"):
+        raise HTTPException(status_code=422, detail="Profile photo must be an image.")
+
+    if not IMGBB_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="ImgBB API key is missing. Add IMGBB_API_KEY to backend/.env.",
+        )
+
+    image_payload = photo_value.split(",", 1)[1] if "," in photo_value else photo_value
+    boundary = f"----sl-lps-imgbb-{secrets.token_hex(12)}"
+    form_parts = []
+
+    for name, value in {"key": IMGBB_API_KEY, "image": image_payload}.items():
+        form_parts.extend(
+            [
+                f"--{boundary}",
+                f'Content-Disposition: form-data; name="{name}"',
+                "",
+                value,
+            ]
+        )
+
+    form_parts.append(f"--{boundary}--")
+    form_parts.append("")
+    form_payload = "\r\n".join(form_parts).encode("utf-8")
+    request = urllib.request.Request(
+        IMGBB_UPLOAD_URL,
+        data=form_payload,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            body = response.read().decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="ImgBB upload failed. Please try again.",
+        ) from exc
+
+    result = json.loads(body)
+    image_url = result.get("data", {}).get("url") or result.get("data", {}).get("display_url")
+
+    if not image_url:
+        raise HTTPException(status_code=502, detail="ImgBB did not return an image URL.")
+
+    return image_url
 
 
 def base64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def base64url_decode(value: str) -> bytes:
+    padded_value = value + "=" * ((4 - len(value) % 4) % 4)
+    return base64.urlsafe_b64decode(padded_value.encode("ascii"))
 
 
 def create_access_token(user: dict) -> str:
@@ -323,6 +428,48 @@ def create_access_token(user: dict) -> str:
     return f"{signing_input}.{base64url_encode(signature)}"
 
 
+def parse_access_token(token: str) -> dict:
+    try:
+        header_value, payload_value, signature_value = token.split(".")
+        signing_input = f"{header_value}.{payload_value}"
+        expected_signature = hmac.new(
+            JWT_SECRET.encode("utf-8"),
+            signing_input.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        actual_signature = base64url_decode(signature_value)
+
+        if not secrets.compare_digest(expected_signature, actual_signature):
+            raise ValueError("Invalid signature")
+
+        payload = json.loads(base64url_decode(payload_value))
+        expires_at = int(payload.get("exp", 0))
+        if expires_at <= int(time.time()):
+            raise ValueError("Expired token")
+
+        return payload
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.") from exc
+
+
+def get_current_user_payload(authorization: str | None) -> dict:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header.")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Invalid authorization header.")
+
+    return parse_access_token(token)
+
+
+def require_admin_user(authorization: str | None) -> dict:
+    user = get_current_user_payload(authorization)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access is required.")
+    return user
+
+
 @app.on_event("startup")
 def prepare_auth_users():
     with engine.begin() as conn:
@@ -338,9 +485,55 @@ def prepare_auth_users():
                     middle_name TEXT NULL,
                     last_name TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'admin',
+                    job_role TEXT NULL,
+                    phone_number TEXT NULL,
+                    office TEXT NOT NULL DEFAULT 'Provincial Disaster Risk Reduction and Management Office',
+                    profile_photo_url TEXT NULL,
+                    profile_photo_data_url TEXT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS job_role TEXT NULL;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS phone_number TEXT NULL;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS office TEXT NOT NULL
+                DEFAULT 'Provincial Disaster Risk Reduction and Management Office';
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS profile_photo_url TEXT NULL;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT NULL;
                 """
             )
         )
@@ -733,7 +926,12 @@ def login(request: LoginRequest):
                     first_name,
                     middle_name,
                     last_name,
-                    role
+                    role,
+                    job_role,
+                    phone_number,
+                    office,
+                    profile_photo_url,
+                    profile_photo_data_url
                 FROM users
                 WHERE lower(email) = :email
                 LIMIT 1;
@@ -754,6 +952,337 @@ def login(request: LoginRequest):
         "accessToken": create_access_token(user_response(row)),
         "user": user_response(row),
     }
+
+
+@app.get("/profile")
+def get_profile(authorization: str | None = Header(default=None)):
+    current_user = get_current_user_payload(authorization)
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    email,
+                    first_name,
+                    middle_name,
+                    last_name,
+                    role,
+                    job_role,
+                    phone_number,
+                    office,
+                    profile_photo_url,
+                    profile_photo_data_url
+                FROM users
+                WHERE id = :user_id
+                LIMIT 1;
+                """
+            ),
+            {"user_id": int(current_user["sub"])},
+        ).mappings().first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Profile was not found.")
+
+    return {"profile": user_response(row)}
+
+
+@app.put("/profile")
+def update_profile(
+    request: ProfileUpdateRequest,
+    authorization: str | None = Header(default=None),
+):
+    current_user = get_current_user_payload(authorization)
+    email = request.email.strip().lower()
+    first_name = request.firstName.strip()
+    middle_name = request.middleName.strip() if request.middleName else None
+    last_name = request.lastName.strip()
+    phone_number = request.phone.strip() if request.phone else None
+    job_role = request.jobRole.strip() if request.jobRole else None
+    profile_photo_url = upload_profile_photo_to_imgbb(request.photoDataUrl)
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="A valid email address is required.")
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET
+                        email = :email,
+                        first_name = :first_name,
+                        middle_name = :middle_name,
+                        last_name = :last_name,
+                        phone_number = :phone_number,
+                        job_role = :job_role,
+                        office = :office,
+                        profile_photo_url = :profile_photo_url,
+                        profile_photo_data_url = :profile_photo_data_url,
+                        updated_at = NOW()
+                    WHERE id = :user_id
+                    RETURNING
+                        id,
+                        email,
+                        first_name,
+                        middle_name,
+                        last_name,
+                        role,
+                        job_role,
+                        phone_number,
+                        office,
+                        profile_photo_url,
+                        profile_photo_data_url;
+                    """
+                ),
+                {
+                    "user_id": int(current_user["sub"]),
+                    "email": email,
+                    "first_name": first_name,
+                    "middle_name": middle_name,
+                    "last_name": last_name,
+                    "phone_number": phone_number,
+                    "job_role": job_role,
+                    "office": DEFAULT_OFFICE,
+                    "profile_photo_url": profile_photo_url,
+                    "profile_photo_data_url": None,
+                },
+            ).mappings().first()
+    except Exception as exc:
+        if "users_email_key" in str(exc) or "duplicate key" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Email is already registered.") from exc
+        raise
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Profile was not found.")
+
+    return {
+        "message": "Profile updated",
+        "profile": user_response(row),
+    }
+
+
+@app.get("/accounts")
+def list_accounts(authorization: str | None = Header(default=None)):
+    require_admin_user(authorization)
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    email,
+                    first_name,
+                    middle_name,
+                    last_name,
+                    role,
+                    job_role,
+                    created_at,
+                    updated_at
+                FROM users
+                ORDER BY created_at DESC, id DESC;
+                """
+            )
+        ).mappings().all()
+
+    return {
+        "accounts": [
+            {
+                **user_response(row),
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/accounts")
+def create_account(
+    request: CreateAccountRequest,
+    authorization: str | None = Header(default=None),
+):
+    require_admin_user(authorization)
+    email = request.email.strip().lower()
+    first_name = request.firstName.strip()
+    middle_name = request.middleName.strip() if request.middleName else None
+    last_name = request.lastName.strip()
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="A valid email address is required.")
+
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(request.password, salt)
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO users (
+                        email,
+                        password_hash,
+                        salt,
+                        first_name,
+                        middle_name,
+                        last_name,
+                        job_role,
+                        role
+                    )
+                    VALUES (
+                        :email,
+                        :password_hash,
+                        :salt,
+                        :first_name,
+                        :middle_name,
+                        :last_name,
+                        :job_role,
+                        'user'
+                    )
+                    RETURNING
+                        id,
+                        email,
+                        first_name,
+                        middle_name,
+                        last_name,
+                        role,
+                        job_role,
+                        created_at,
+                        updated_at;
+                    """
+                ),
+                {
+                    "email": email,
+                    "password_hash": password_hash,
+                    "salt": salt,
+                    "first_name": first_name,
+                    "middle_name": middle_name,
+                    "last_name": last_name,
+                    "job_role": request.jobRole.strip() if request.jobRole else None,
+                },
+            ).mappings().first()
+    except Exception as exc:
+        if "users_email_key" in str(exc) or "duplicate key" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Email is already registered.") from exc
+        raise
+
+    return {
+        "message": "User account created",
+        "account": {
+            **user_response(row),
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        },
+    }
+
+
+@app.put("/accounts/{account_id}")
+def update_account(
+    account_id: int,
+    request: UpdateAccountRequest,
+    authorization: str | None = Header(default=None),
+):
+    require_admin_user(authorization)
+    email = request.email.strip().lower()
+    first_name = request.firstName.strip()
+    middle_name = request.middleName.strip() if request.middleName else None
+    last_name = request.lastName.strip()
+    job_role = request.jobRole.strip() if request.jobRole else None
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="A valid email address is required.")
+
+    password_update_sql = ""
+    params = {
+        "account_id": account_id,
+        "email": email,
+        "first_name": first_name,
+        "middle_name": middle_name,
+        "last_name": last_name,
+        "job_role": job_role,
+    }
+
+    if request.password:
+        salt = secrets.token_hex(16)
+        password_update_sql = ", password_hash = :password_hash, salt = :salt"
+        params["password_hash"] = hash_password(request.password, salt)
+        params["salt"] = salt
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE users
+                    SET
+                        email = :email,
+                        first_name = :first_name,
+                        middle_name = :middle_name,
+                        last_name = :last_name,
+                        job_role = :job_role,
+                        updated_at = NOW()
+                        {password_update_sql}
+                    WHERE id = :account_id
+                      AND role = 'user'
+                    RETURNING
+                        id,
+                        email,
+                        first_name,
+                        middle_name,
+                        last_name,
+                        role,
+                        job_role,
+                        created_at,
+                        updated_at;
+                    """
+                ),
+                params,
+            ).mappings().first()
+    except Exception as exc:
+        if "users_email_key" in str(exc) or "duplicate key" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Email is already registered.") from exc
+        raise
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Editable user account was not found.")
+
+    return {
+        "message": "User account updated",
+        "account": {
+            **user_response(row),
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        },
+    }
+
+
+@app.delete("/accounts/{account_id}")
+def delete_account(
+    account_id: int,
+    authorization: str | None = Header(default=None),
+):
+    require_admin_user(authorization)
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                DELETE FROM users
+                WHERE id = :account_id
+                  AND role = 'user'
+                RETURNING id;
+                """
+            ),
+            {"account_id": account_id},
+        ).mappings().first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Deletable user account was not found.")
+
+    return {"message": "User account deleted", "id": account_id}
 
 
 @lru_cache(maxsize=1)

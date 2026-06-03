@@ -213,8 +213,8 @@ function quickLogin(provider) {
 }
 
 function loginSuccess(session) {
-    if (!session?.accessToken || session?.user?.role !== 'admin') {
-        showErrLogin('This account is not authorized for admin access.');
+    if (!session?.accessToken || !['admin', 'user'].includes(session?.user?.role)) {
+        showErrLogin('This account is not authorized for system access.');
         return;
     }
     try {

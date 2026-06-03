@@ -13,6 +13,7 @@ import '../../public/admin_template/src/assets/scss/style.scss'
 import '../App.css'
 import AdminAlertDropdown from './AdminAlertDropdown'
 import AdminProfileMenu from './AdminProfileMenu'
+import { isAdminUser } from './auth-session'
 import { API_BASE_URL, applyTheme, getStoredTheme, loadSavedTheme, saveTheme } from './theme-settings'
 
 const SOUTHERN_LEYTE_POSITION = [10.22, 125.05]
@@ -1067,6 +1068,20 @@ function PredictionPage() {
               <span className="nav-text">Dashboard</span>
             </a>
           </li>
+          <li>
+            <a className="nav-link" href="/admin/profile">
+              <i className="ti ti-user-circle"></i>
+              <span className="nav-text">Profile</span>
+            </a>
+          </li>
+          {isAdminUser() ? (
+            <li>
+              <a className="nav-link" href="/admin/accounts">
+                <i className="ti ti-users-plus"></i>
+                <span className="nav-text">Accounts</span>
+              </a>
+            </li>
+          ) : null}
           <li>
             <a className="nav-link active" href="/admin/prediction">
               <i className="ti ti-map-2"></i>

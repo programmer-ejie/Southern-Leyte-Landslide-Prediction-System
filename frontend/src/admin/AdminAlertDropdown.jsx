@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { API_BASE_URL } from './theme-settings'
 
+const LATEST_ALERT_CACHE_KEY = 'sl-lps-latest-alert-zone'
+
 const riskLabelByLevel = {
   '15%': 'Low',
   '30%': 'Slightly Low',
@@ -11,6 +13,20 @@ const riskLabelByLevel = {
   Low: 'Low',
   Medium: 'Moderate',
   High: 'High',
+}
+
+function getCachedLatestAlert() {
+  try {
+    return JSON.parse(localStorage.getItem(LATEST_ALERT_CACHE_KEY) || 'null')
+  } catch (_) {
+    return null
+  }
+}
+
+function cacheLatestAlert(alert) {
+  if (!alert) return
+
+  localStorage.setItem(LATEST_ALERT_CACHE_KEY, JSON.stringify(alert))
 }
 
 function getSeverity(feature) {
@@ -42,38 +58,82 @@ function getPriorityScore(feature) {
   return Math.round((probability * 0.72 + exposureScore * 0.28) * 100)
 }
 
+function getAlertSourceFromName(name) {
+  const alertName = String(name ?? '')
+
+  if (alertName.startsWith('Live Rainfall Prediction')) {
+    return {
+      label: 'Open-Meteo Forecast API',
+      detail: 'Live rainfall prediction output',
+    }
+  }
+
+  if (alertName.startsWith('Rainfall Simulation')) {
+    return {
+      label: 'Simulated rainfall scenario',
+      detail: 'Saved rainfall simulation output',
+    }
+  }
+
+  if (alertName.startsWith('Baseline Hazard')) {
+    return {
+      label: 'Baseline hazard layer',
+      detail: 'Curated Southern Leyte hazard layer',
+    }
+  }
+
+  return {
+    label: 'Saved model prediction',
+    detail: 'Latest saved prediction output',
+  }
+}
+
 function buildAlerts(riskZones) {
   return [...(riskZones?.features ?? [])]
-    .map((feature) => ({
-      id: feature.properties.id,
-      name: feature.properties.name,
-      riskLevel:
-        riskLabelByLevel[feature.properties.risk_level] ??
-        feature.properties.risk_level,
-      probability: feature.properties.probability ?? 0,
-      severity: getSeverity(feature),
-      priority: getPriorityScore(feature),
-    }))
+    .map((feature) => {
+      const source = getAlertSourceFromName(feature.properties.name)
+
+      return {
+        id: feature.properties.id,
+        name: feature.properties.name,
+        riskLevel:
+          riskLabelByLevel[feature.properties.risk_level] ??
+          feature.properties.risk_level,
+        probability: feature.properties.probability ?? 0,
+        severity: getSeverity(feature),
+        priority: getPriorityScore(feature),
+        sourceLabel: source.label,
+        sourceDetail: source.detail,
+      }
+    })
     .sort((alertA, alertB) => alertB.priority - alertA.priority)
 }
 
 function buildAlertsFromPayload(alertPayload) {
   return [...(alertPayload?.alerts ?? [])]
-    .map((alert) => ({
-      id: alert.id,
-      name: alert.name,
-      riskLevel: alert.riskLevel,
-      probability: alert.probability ?? 0,
-      severity: alert.severity,
-      priority: alert.priority ?? 0,
-    }))
+    .map((alert) => {
+      const source = getAlertSourceFromName(alert.name)
+
+      return {
+        id: alert.id,
+        name: alert.name,
+        riskLevel: alert.riskLevel,
+        probability: alert.probability ?? 0,
+        severity: alert.severity,
+        priority: alert.priority ?? 0,
+        sourceLabel: source.label,
+        sourceDetail: alert.sourceDetail ?? source.detail,
+      }
+    })
     .sort((alertA, alertB) => alertB.priority - alertA.priority)
 }
 
 function AdminAlertDropdown({ alertsPayload, riskZones }) {
   const dropdownRef = useRef(null)
   const [isOpen, setIsOpen] = useState(false)
+  const [fallbackRiskZones, setFallbackRiskZones] = useState(null)
   const [fallbackAlertsPayload, setFallbackAlertsPayload] = useState(null)
+  const [cachedLatestAlert, setCachedLatestAlert] = useState(() => getCachedLatestAlert())
 
   useEffect(() => {
     if (alertsPayload || riskZones) {
@@ -83,16 +143,25 @@ function AdminAlertDropdown({ alertsPayload, riskZones }) {
     let isMounted = true
 
     axios
-      .get(`${API_BASE_URL}/alerts`)
+      .get(`${API_BASE_URL}/risk-zones`)
       .then((response) => {
         if (isMounted) {
-          setFallbackAlertsPayload(response.data)
+          setFallbackRiskZones(response.data)
         }
       })
       .catch(() => {
-        if (isMounted) {
-          setFallbackAlertsPayload({ alerts: [] })
-        }
+        axios
+          .get(`${API_BASE_URL}/alerts`)
+          .then((response) => {
+            if (isMounted) {
+              setFallbackAlertsPayload(response.data)
+            }
+          })
+          .catch(() => {
+            if (isMounted) {
+              setFallbackAlertsPayload({ alerts: [] })
+            }
+          })
       })
 
     return () => {
@@ -118,13 +187,29 @@ function AdminAlertDropdown({ alertsPayload, riskZones }) {
   }, [])
 
   const alerts = useMemo(() => {
-    if (alertsPayload || fallbackAlertsPayload) {
-      return buildAlertsFromPayload(alertsPayload ?? fallbackAlertsPayload)
+    if (alertsPayload) {
+      return buildAlertsFromPayload(alertsPayload)
     }
 
-    return buildAlerts(riskZones)
-  }, [alertsPayload, fallbackAlertsPayload, riskZones])
-  const previewAlerts = alerts.slice(0, 5)
+    if (riskZones || fallbackRiskZones) {
+      return buildAlerts(riskZones ?? fallbackRiskZones)
+    }
+
+    return buildAlertsFromPayload(fallbackAlertsPayload)
+  }, [alertsPayload, fallbackAlertsPayload, fallbackRiskZones, riskZones])
+  const latestAlert = alerts[0] ?? cachedLatestAlert ?? null
+  const previewAlerts = latestAlert ? [latestAlert] : []
+
+  useEffect(() => {
+    const nextLatestAlert = alerts[0]
+
+    if (!nextLatestAlert) {
+      return
+    }
+
+    cacheLatestAlert(nextLatestAlert)
+    setCachedLatestAlert(nextLatestAlert)
+  }, [alerts])
 
   return (
     <li className="position-relative" ref={dropdownRef}>
@@ -137,7 +222,7 @@ function AdminAlertDropdown({ alertsPayload, riskZones }) {
       >
         <i className="ti ti-map-pin-exclamation fs-5"></i>
         <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger mt-2 ms-n2">
-          {alerts.length}
+          {latestAlert ? 1 : 0}
         </span>
       </button>
 
@@ -145,10 +230,14 @@ function AdminAlertDropdown({ alertsPayload, riskZones }) {
         <div className="alerts-dropdown shadow-lg">
           <div className="alerts-dropdown-header">
             <div>
-              <strong>Alert Zones</strong>
-              <span>Top priority risk zones</span>
+              <strong>Latest Alert Zone</strong>
+              <span>
+                {latestAlert
+                  ? `Source: ${latestAlert.sourceLabel}`
+                  : 'No latest prediction output'}
+              </span>
             </div>
-            <span>{alerts.length}</span>
+            <span>{latestAlert ? 1 : 0}</span>
           </div>
 
           <div className="alerts-dropdown-list">
@@ -163,7 +252,7 @@ function AdminAlertDropdown({ alertsPayload, riskZones }) {
                   <strong>{alert.name}</strong>
                   <small>
                     {alert.severity} - {Math.round(alert.probability * 100)}%
-                    probability
+                    probability - {alert.sourceDetail}
                   </small>
                 </span>
                 <em>{alert.priority}</em>
