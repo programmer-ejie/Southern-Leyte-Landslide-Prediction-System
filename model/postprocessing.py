@@ -6,14 +6,20 @@ import numpy as np
 try:
     from rasterio.features import shapes as raster_shapes
     from rasterio.transform import from_bounds
+except ImportError:  # pragma: no cover - fallback for environments without rasterio
+    raster_shapes = from_bounds = None
+
+try:
     import shapefile
+except ImportError:  # pragma: no cover - fallback for environments without pyshp
+    shapefile = None
+
+try:
     from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, shape
     from shapely.ops import unary_union
     from shapely.validation import make_valid
     from shapely import wkt
-except ImportError:  # pragma: no cover - fallback for environments without clipping deps
-    raster_shapes = from_bounds = None
-    shapefile = None
+except ImportError:  # pragma: no cover - fallback for environments without shapely
     GeometryCollection = MultiPolygon = Polygon = None
     shape = unary_union = make_valid = wkt = None
 
@@ -91,17 +97,6 @@ def probability_mask_to_risk_wkts(
     bounds = bounds or SOUTHERN_LEYTE_DEMO_BOUNDS
     mask = _squeeze_mask(probability_mask)
 
-    if raster_shapes is None or from_bounds is None or shape is None:
-        fallback_wkt = probability_mask_to_polygon_wkt(mask, threshold=0.5, bounds=bounds)
-        return [
-            {
-                "name": f"{name_prefix} High Risk",
-                "risk_level": "High",
-                "probability": float(np.nanmax(mask)),
-                "wkt": fallback_wkt,
-            }
-        ]
-
     if band_specs is None:
         band_specs = [
             (1, "Low", f"{name_prefix} Low Risk", 0.0, medium_threshold),
@@ -115,6 +110,16 @@ def probability_mask_to_risk_wkts(
             classified[(mask >= min_value) & (mask <= max_value)] = value
         else:
             classified[(mask >= min_value) & (mask < max_value)] = value
+
+    if raster_shapes is None or from_bounds is None or shape is None:
+        return _probability_mask_to_risk_wkts_fallback(
+            mask,
+            classified,
+            bounds,
+            band_specs,
+            min_pixels,
+            name_prefix,
+        )
 
     transform = from_bounds(
         bounds["min_lon"],
@@ -204,6 +209,88 @@ def probability_mask_to_risk_wkts(
         )
 
     return results
+
+
+def postprocessing_capabilities():
+    return {
+        "rasterio_shapes": raster_shapes is not None,
+        "rasterio_from_bounds": from_bounds is not None,
+        "shapely": shape is not None and unary_union is not None and make_valid is not None,
+        "pyshp": shapefile is not None,
+        "mode": (
+            "rasterio"
+            if raster_shapes is not None and from_bounds is not None and shape is not None
+            else "banded_fallback"
+        ),
+    }
+
+
+def _probability_mask_to_risk_wkts_fallback(
+    mask,
+    classified,
+    bounds,
+    band_specs,
+    min_pixels,
+    name_prefix,
+):
+    results = []
+    risk_specs = [
+        (value, risk_level, name)
+        for value, risk_level, name, _min_value, _max_value in sorted(
+            band_specs,
+            key=lambda item: item[0],
+            reverse=True,
+        )
+    ]
+
+    for value, risk_level, name in risk_specs:
+        band_mask = classified == value
+        if not np.any(band_mask):
+            continue
+
+        components = [
+            component
+            for component in _connected_components(band_mask)
+            if len(component) >= min_pixels
+        ]
+        if not components:
+            continue
+
+        polygons = []
+        for component in components:
+            hull = _component_hull(component, bounds)
+            if len(hull) >= 4:
+                polygons.append(hull)
+
+        if not polygons:
+            continue
+
+        band_values = mask[band_mask]
+        results.append(
+            {
+                "name": name,
+                "risk_level": risk_level,
+                "probability": float(np.nanmax(band_values)),
+                "wkt": _clip_wkt_to_southern_leyte(_polygons_to_wkt(polygons)),
+            }
+        )
+
+    if results:
+        return results
+
+    fallback_wkt = probability_mask_to_polygon_wkt(
+        mask,
+        threshold=adaptive_mask_threshold(mask),
+        bounds=bounds,
+    )
+    return [
+        {
+            "name": f"{name_prefix} High Risk",
+            "risk_level": "High",
+            "probability": float(np.nanmax(mask)),
+            "wkt": fallback_wkt,
+        }
+    ]
 
 
 def _squeeze_mask(probability_mask):

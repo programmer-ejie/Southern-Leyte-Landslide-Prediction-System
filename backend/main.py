@@ -72,6 +72,7 @@ from model.inference import (
     run_rainfall_simulation,
     run_sample_inference,
 )
+from model.postprocessing import postprocessing_capabilities
 
 app = FastAPI(title="Landslide Prediction API")
 
@@ -1768,6 +1769,7 @@ def model_health():
         "model": MODEL_NAME,
         "checkpoint": MODEL_CHECKPOINT,
         "status": "loaded",
+        "postprocessing": postprocessing_capabilities(),
         "inference_check": run_sample_inference(),
     }
 
